@@ -32,6 +32,9 @@ To retry or collect a batch that outlived the job, re-run the failed **Claude re
 To redo a commit that already has a review: Actions → Claude review → Run workflow → PR number, tick
 *force*, then re-run the PR's job (a dispatched run is not attached to the PR's checks).
 
+A PR opened before the workflow existed has no **Claude review** check, so a required check blocks it. Close and
+reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the workflow on the PR.
+
 Inputs (`with:`): `api-keys` (required), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
 `max-wait-minutes` (`20`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
