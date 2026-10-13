@@ -3,7 +3,8 @@ name: Claude review
 # examples/claude-review.yml instead.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # labeled/unlabeled re-evaluate the override label, reusing the head commit's stored review.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       pr:
@@ -25,10 +26,11 @@ permissions:
 
 jobs:
   review:
+    # The job name is the status check that rulesets require.
+    name: Claude review
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,3 +40,5 @@ jobs:
           api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
           pr: ${{ github.event.pull_request.number || inputs.pr }}
           force: ${{ inputs.force || false }}
+          mode: pass
+          max-wait-minutes: 45

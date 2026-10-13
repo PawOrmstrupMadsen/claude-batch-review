@@ -25,8 +25,12 @@ interface Slot {
   client: Anthropic;
 }
 
+type Verdict = "pass" | "minor" | "changes" | "unknown";
+type Status = "done" | "pending" | "failed" | "skipped";
+
 interface State {
   status: "pending" | "done" | "failed";
+  verdict?: Verdict;
   sha: string;
   batch?: string;
   key?: string;
@@ -47,17 +51,18 @@ interface Comment {
   user: { login: string } | null;
 }
 
-async function run(): Promise<void> {
+interface Outcome {
+  status: Status;
+  verdict?: Verdict;
+  overridden?: boolean;
+}
+
+async function run(): Promise<Outcome> {
   const keys = input("api-keys")
     .split(/\r?\n/)
     .map((k) => k.trim())
     .filter((k) => k && !k.startsWith("#"));
   keys.forEach(log.mask);
-  if (keys.length === 0) {
-    log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
-    setOutput("status", "skipped");
-    return;
-  }
   const slots: Slot[] = keys.map((key) => ({
     key,
     fp: createHash("sha256").update(key).digest("hex").slice(0, 8),
@@ -66,7 +71,7 @@ async function run(): Promise<void> {
 
   const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
   const gh = new GitHub(input("github-token"), owner, repo);
-  const prNumber = Number(input("pr") || eventPr());
+  const prNumber = Number(input("pr") || event.pull_request?.number || "");
   if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
   const pr = await gh.json<Pull>(`/repos/${owner}/${repo}/pulls/${prNumber}`);
 
@@ -80,6 +85,12 @@ async function run(): Promise<void> {
     promptFile: input("prompt-file"),
     force: input("force") === "true",
   };
+  const overridden = pr.labels.some((l) => l.name === overrideLabel);
+  if (keys.length === 0) {
+    log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
+    return { status: "skipped", overridden };
+  }
+
   const sha7 = pr.head.sha.slice(0, 7);
 
   let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
@@ -88,8 +99,14 @@ async function run(): Promise<void> {
 
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
     log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
-    setOutput("status", "done");
-    return;
+    return { status: "done", verdict: prior.verdict ?? parseVerdict(comment?.body ?? ""), overridden };
+  }
+  // A label change only re-evaluates the gate: it may resume a pending batch, never pay for a new one.
+  const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
+  const resumable = prior?.status === "pending" && prior.sha === pr.head.sha;
+  if (labelEvent && (overridden || !resumable)) {
+    log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
+    return { status: prior?.sha === pr.head.sha && prior.status === "failed" ? "failed" : "pending", overridden };
   }
   if (prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
@@ -156,13 +173,13 @@ async function run(): Promise<void> {
       `${header(j.model)}⏳ Queued in batch \`${j.batch}\` (key ${j.slot + 1}/${slots.length}). ` +
         "This comment becomes the review when the batch ends. If the workflow times out first, re-run it to collect the result.",
     );
-  const fail = async (model: string, why: string) => {
+  const fail = async (model: string, why: string): Promise<Outcome> => {
     await upsert({ status: "failed", sha: pr.head.sha }, `${header(model)}⚠️ No review: ${why}`);
     log.warning(why);
-    setOutput("status", "failed");
+    return { status: "failed", overridden };
   };
 
-  const review = async (): Promise<void> => {
+  const review = async (): Promise<Outcome> => {
     if (!job) {
       job = await submit(0, cfg.model);
       if (!job) return fail(cfg.model, `none of the ${slots.length} API keys has credit left. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
@@ -175,8 +192,7 @@ async function run(): Promise<void> {
       const batch = await waitForBatch(client, job.batch, deadline);
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 60_000} min; re-run the workflow to collect it.`);
-        setOutput("status", "pending");
-        return;
+        return { status: "pending", overridden };
       }
       let result: Anthropic.Messages.MessageBatchResult | null = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
@@ -198,13 +214,13 @@ async function run(): Promise<void> {
           .join("\n\n")
           .trim();
         const truncated = msg.stop_reason === "max_tokens" ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
+        const verdict = parseVerdict(text);
         await upsert(
-          { status: "done", sha: pr.head.sha, model: msg.model },
+          { status: "done", verdict, sha: pr.head.sha, model: msg.model },
           `${header(msg.model)}${text || "_Empty response._"}${truncated}\n\n${footer(msg, job, batch, slots.length, await context())}`,
         );
-        log.info(`Posted the review for #${prNumber} @ ${sha7}.`);
-        setOutput("status", "done");
-        return;
+        log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+        return { status: "done", verdict, overridden };
       }
 
       if (result.type === "errored") {
@@ -224,7 +240,7 @@ async function run(): Promise<void> {
   };
 
   try {
-    await review();
+    return await review();
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     // A submitted batch stays collectable: keep the pending state and say what went wrong.
@@ -236,6 +252,12 @@ async function run(): Promise<void> {
     else await fail(cfg.model, `the job hit an error: \`${why.slice(0, 300)}\``).catch(() => {});
     throw e;
   }
+}
+
+function parseVerdict(text: string): Verdict {
+  // ⚠ may come with or without the U+FE0F variation selector.
+  const m = /\*\*Verdict:\*\*\s*(✅|⚠\uFE0F?|❌)/u.exec(text);
+  return !m ? "unknown" : m[1] === "✅" ? "pass" : m[1] === "❌" ? "changes" : "minor";
 }
 
 function num(name: string, fallback: number): number {
@@ -302,14 +324,59 @@ function parseState(body: string): State | null {
   }
 }
 
-function eventPr(): string {
-  const path = process.env.GITHUB_EVENT_PATH;
-  if (!path) return "";
-  const event = JSON.parse(readFileSync(path, "utf8")) as { pull_request?: { number: number } };
-  return String(event.pull_request?.number ?? "");
+interface PrEvent {
+  action?: string;
+  pull_request?: { number: number; labels?: { name: string }[] };
 }
 
-run().catch((e: unknown) => {
-  log.error(e instanceof Error ? (e.stack ?? e.message) : String(e));
+function readEvent(): PrEvent {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) return {};
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as PrEvent;
+  } catch {
+    return {};
+  }
+}
+
+const mode = input("mode", "advisory");
+const overrideLabel = input("override-label", "review-override");
+const event = readEvent();
+/** Known before run() can fail, so a crash still honours the label. */
+const eventOverride = (event.pull_request?.labels ?? []).some((l) => l.name === overrideLabel);
+
+/** Why the gate blocks, or null when it lets the PR through. */
+function blocker({ status, verdict }: Outcome): string | null {
+  if (mode === "advisory") return null;
+  if (status !== "done") return `No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`;
+  if (mode === "pass" && verdict === "changes") return "The review asks for changes. Fix them and push.";
+  if (mode === "pass" && verdict === "unknown") return "The review has no recognisable verdict line. Re-run with force to redo it.";
+  return null;
+}
+
+if (!["advisory", "complete", "pass"].includes(mode)) {
+  log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
   process.exitCode = 1;
-});
+} else {
+  run()
+    .then((outcome) => {
+      setOutput("status", outcome.status);
+      setOutput("verdict", outcome.verdict ?? "");
+      const why = blocker(outcome);
+      if (!why) return;
+      if (outcome.overridden) log.notice(`${why} The \`${overrideLabel}\` label overrides it.`);
+      else {
+        log.error(`${why} To merge anyway, add the \`${overrideLabel}\` label.`);
+        process.exitCode = 1;
+      }
+    })
+    .catch((e: unknown) => {
+      setOutput("status", "failed");
+      const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
+      if (mode !== "advisory" && eventOverride) log.notice(`${msg}\nThe \`${overrideLabel}\` label overrides the failure.`);
+      else {
+        log.error(msg);
+        process.exitCode = 1;
+      }
+    });
+}

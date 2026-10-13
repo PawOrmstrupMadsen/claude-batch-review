@@ -6,7 +6,20 @@ half the normal token price. It takes a list of API keys and moves on to the nex
 of credit, so several prepaid balances can be used up one after the other.
 
 The review is one sticky PR comment (marked `<!-- claude-batch-review … -->`), rewritten on every push.
-It is advisory: the job is `continue-on-error` and never blocks a merge.
+The `mode` input decides whether it can block a merge:
+
+| `mode` | The job fails when |
+|---|---|
+| `advisory` (default) | never (only on a crash) |
+| `complete` | no review is posted for the head commit: no keys, keys out of credit, an error, or the batch outlived `max-wait-minutes` |
+| `pass` | as `complete`, or the verdict is ❌ Changes needed, or the review has no recognisable verdict line |
+
+In `complete` and `pass`, the PR label named by `override-label` (`review-override`) lets any of these through.
+
+The example workflow uses `pass` and names the job **Claude review**; add that name as a required status
+check in the repo's ruleset to make it a merge gate. The verdict is stored with the review, so re-running
+the job, or adding or removing the override label (the workflow triggers on `labeled`/`unlabeled`), gives the
+answer again without a new batch. A new push gets a new review.
 
 ## Add it to a repo
 
@@ -15,13 +28,15 @@ It is advisory: the job is `continue-on-error` and never blocks a merge.
    waits on the network, holding the runner for the few minutes a batch takes.
 2. Make sure the repo can read the `ANTHROPIC_REVIEW_KEYS` secret (see below).
 
-Re-review by hand: Actions → Claude review → Run workflow → PR number (tick *force* to redo a commit that
-already has a review).
+To retry or collect a batch that outlived the job, re-run the failed **Claude review** job from the PR's checks.
+To redo a commit that already has a review: Actions → Claude review → Run workflow → PR number, tick
+*force*, then re-run the PR's job (a dispatched run is not attached to the PR's checks).
 
 Inputs (`with:`): `api-keys` (required), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
-`max-wait-minutes` (`20`), `prompt-file`, `force`, `pr`, `github-token`, `comment-author`.
-Output: `status` = `done`, `pending`, `failed` or `skipped`. Full descriptions are in [`action.yml`](action.yml).
+`max-wait-minutes` (`20`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
+`pr`, `github-token`, `comment-author`. Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
+`verdict` = `pass`, `minor`, `changes` or `unknown`. Full descriptions are in [`action.yml`](action.yml).
 
 Repo-specific review rules go in `.github/claude-review.md` (or the file named by `prompt-file`).
 
@@ -63,7 +78,13 @@ after creating a new personal repo.
    is not accepted by the Batches API.
 
 The model sees the PR as untrusted data and has no tools: it cannot run code, open other files or reach
-the network, so prompt injection in a diff can at worst skew the review text.
+the network. Prompt injection in a diff can still skew the review, and in `pass` mode that includes the
+verdict, so the gate is no defence against a hostile contributor: their PRs need a human review.
+
+Two cases pass the gate without a review: PRs opened by bots (the example workflow skips them, and a skipped
+required check counts as passed) and, with the override label, fork PRs, which get no secrets. A label
+change never submits a new batch: it reuses the head commit's review, waits for a pending one, or, with the
+override label, passes at once.
 
 ## Cost and timing
 

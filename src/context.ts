@@ -6,6 +6,7 @@ export interface Pull {
   title: string;
   body: string | null;
   draft: boolean;
+  labels: { name: string }[];
   html_url: string;
   user: { login: string };
   base: { sha: string; ref: string };
