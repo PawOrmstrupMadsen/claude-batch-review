@@ -28,12 +28,15 @@ jobs:
   review:
     # The job name is the status check that rulesets require.
     name: Claude review
+    # Bot PRs (Renovate, Dependabot) are skipped on purpose; a skipped check counts as passed.
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot')
     # A self-hosted runner of this repo (never a deploy runner). The job only waits on the network.
-    # GitHub-hosted runners (ubuntu-latest) work too, but cost Actions minutes in a private repo.
+    # GitHub-hosted runners (ubuntu-latest) cost Actions minutes in a private repo. A public repo uses
+    # ubuntu-latest instead: free there, and fork PRs must never reach a self-hosted runner.
     runs-on: [self-hosted, linux, x64, <repo-label>]
     timeout-minutes: 60
     steps:
+      # @main on purpose: one central version for every repo.
       - uses: PawOrmstrupMadsen/claude-batch-review@main
         with:
           api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
