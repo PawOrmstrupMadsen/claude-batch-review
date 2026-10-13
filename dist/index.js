@@ -1033,12 +1033,12 @@ async function checkCredentialsFileSafety(path4, onWarn = (m) => console.warn(`a
   } catch {
     return;
   }
-  const mode = st.mode & 511;
-  if (mode & 18) {
-    throw new WorkloadIdentityError(`Credentials file at ${resolved} is group/world-writable (mode 0o${mode.toString(8)}); this allows other local users to plant tokens. Run \`chmod 600 ${resolved}\`.`);
+  const mode2 = st.mode & 511;
+  if (mode2 & 18) {
+    throw new WorkloadIdentityError(`Credentials file at ${resolved} is group/world-writable (mode 0o${mode2.toString(8)}); this allows other local users to plant tokens. Run \`chmod 600 ${resolved}\`.`);
   }
-  if (mode & 36) {
-    throw new WorkloadIdentityError(`Credentials file at ${resolved} is group/world-readable (mode 0o${mode.toString(8)}); run \`chmod 600 ${resolved}\` before retrying.`);
+  if (mode2 & 36) {
+    throw new WorkloadIdentityError(`Credentials file at ${resolved} is group/world-readable (mode 0o${mode2.toString(8)}); run \`chmod 600 ${resolved}\` before retrying.`);
   }
   if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
     onWarn(`credentials file at ${resolved} is owned by uid ${st.uid} (current process uid ${process.getuid()}); verify this is intentional.`);
@@ -7592,11 +7592,11 @@ async function makeDirsBelowRoot(root, dir) {
   }
 }
 async function replaceViaTemp(dest, data, isExecutable) {
-  const mode = isExecutable ? OWNER_ONLY_EXEC_MODE : OWNER_ONLY_FILE_MODE;
+  const mode2 = isExecutable ? OWNER_ONLY_EXEC_MODE : OWNER_ONLY_FILE_MODE;
   const tmp = path.join(path.dirname(dest), `.fs-${crypto.randomBytes(8).toString("hex")}.tmp`);
   let handle;
   try {
-    handle = await fsp.open(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | O_NOFOLLOW, mode);
+    handle = await fsp.open(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | O_NOFOLLOW, mode2);
     await handle.writeFile(data);
     await handle.close();
     handle = void 0;
@@ -8047,8 +8047,8 @@ var init_memories = __esm({
       }
     };
     DeletePass = class {
-      constructor(mode, cap, waiveWindow) {
-        this.mode = mode;
+      constructor(mode2, cap, waiveWindow) {
+        this.mode = mode2;
         this.cap = cap;
         this.waiveWindow = waiveWindow;
         this.attempted = 0;
@@ -21212,8 +21212,7 @@ async function run() {
   keys.forEach(log.mask);
   if (keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
-    setOutput("status", "skipped");
-    return;
+    return { status: "skipped" };
   }
   const slots = keys.map((key) => ({
     key,
@@ -21235,14 +21234,14 @@ async function run() {
     promptFile: input("prompt-file"),
     force: input("force") === "true"
   };
+  const overridden = pr.labels.some((l) => l.name === overrideLabel);
   const sha7 = pr.head.sha.slice(0, 7);
   let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
   const prior = comment ? parseState(comment.body) : null;
   let job = null;
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
     log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
-    setOutput("status", "done");
-    return;
+    return { status: "done", verdict: prior.verdict ?? "unknown", overridden };
   }
   if (prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
@@ -21311,7 +21310,7 @@ async function run() {
   const fail = async (model, why) => {
     await upsert({ status: "failed", sha: pr.head.sha }, `${header(model)}\u26A0\uFE0F No review: ${why}`);
     log.warning(why);
-    setOutput("status", "failed");
+    return { status: "failed" };
   };
   const review = async () => {
     if (!job) {
@@ -21325,8 +21324,7 @@ async function run() {
       const batch = await waitForBatch(client, job.batch, deadline);
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 6e4} min; re-run the workflow to collect it.`);
-        setOutput("status", "pending");
-        return;
+        return { status: "pending" };
       }
       let result = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
@@ -21343,15 +21341,18 @@ async function run() {
         if (msg.stop_reason === "refusal") return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`);
         const text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n\n").trim();
         const truncated = msg.stop_reason === "max_tokens" ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
+        const verdict = parseVerdict(text);
+        const note = verdict === "changes" && overridden ? `
+
+> The \`${overrideLabel}\` label is set: this verdict does not block the merge.` : "";
         await upsert(
-          { status: "done", sha: pr.head.sha, model: msg.model },
-          `${header(msg.model)}${text || "_Empty response._"}${truncated}
+          { status: "done", verdict, sha: pr.head.sha, model: msg.model },
+          `${header(msg.model)}${text || "_Empty response._"}${truncated}${note}
 
 ${footer(msg, job, batch, slots.length, await context())}`
         );
-        log.info(`Posted the review for #${prNumber} @ ${sha7}.`);
-        setOutput("status", "done");
-        return;
+        log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+        return { status: "done", verdict, overridden };
       }
       if (result.type === "errored") {
         const err = result.error.error;
@@ -21369,7 +21370,7 @@ ${footer(msg, job, batch, slots.length, await context())}`
     return fail(job.model, "gave up after too many resubmissions.");
   };
   try {
-    await review();
+    return await review();
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     if (job)
@@ -21382,6 +21383,10 @@ ${footer(msg, job, batch, slots.length, await context())}`
     });
     throw e;
   }
+}
+function parseVerdict(text) {
+  const m = /\*\*Verdict:\*\*\s*(✅|⚠️|❌)/u.exec(text);
+  return m ? { "\u2705": "pass", "\u26A0\uFE0F": "minor", "\u274C": "changes" }[m[1]] : "unknown";
 }
 function num(name, fallback) {
   const raw = input(name, String(fallback));
@@ -21437,7 +21442,23 @@ function eventPr() {
   const event = JSON.parse(readFileSync(path4, "utf8"));
   return String(event.pull_request?.number ?? "");
 }
-run().catch((e) => {
+var mode = input("mode", "advisory");
+var overrideLabel = input("override-label", "review-override");
+run().then(({ status, verdict, overridden }) => {
+  setOutput("status", status);
+  setOutput("verdict", verdict ?? "");
+  if (mode === "advisory") return;
+  if (status !== "done") {
+    log.error(`No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`);
+    process.exitCode = 1;
+  } else if (mode === "pass" && verdict === "changes") {
+    if (overridden) log.notice(`Changes needed, but the \`${overrideLabel}\` label overrides it.`);
+    else {
+      log.error(`The review asks for changes. Fix them and push, or add the \`${overrideLabel}\` label to merge anyway.`);
+      process.exitCode = 1;
+    }
+  }
+}).catch((e) => {
   log.error(e instanceof Error ? e.stack ?? e.message : String(e));
   process.exitCode = 1;
 });

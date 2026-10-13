@@ -38,12 +38,20 @@ inputs:
   force:
     description: "'true' re-reviews a head commit that already has a review."
     default: 'false'
+  mode:
+    description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict, unless the PR has the override label."
+    default: advisory
+  override-label:
+    description: PR label that lets a ❌ verdict pass in mode `pass`.
+    default: review-override
   comment-author:
     description: Login that owns the sticky comment; change it only when github-token is not the Actions token.
     default: github-actions[bot]
 outputs:
   status:
     description: done, pending (batch still running when the wait ran out), failed or skipped.
+  verdict:
+    description: pass, minor, changes or unknown (empty when there is no review).
 runs:
   using: node24
   main: dist/index.js
