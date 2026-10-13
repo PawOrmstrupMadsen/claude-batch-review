@@ -25,7 +25,8 @@ answer again without a new batch. A new push gets a new review.
 
 1. Copy [`examples/claude-review.yml`](examples/claude-review.yml) to `.github/workflows/claude-review.yml`.
    Replace `<repo-label>` in `runs-on` with the repo's own runner label (never a deploy runner). The job only
-   waits on the network, holding the runner for the few minutes a batch takes.
+   waits on the network, holding the runner for the few minutes a batch takes. A public repo uses
+   `runs-on: ubuntu-latest` instead: free there, and fork PRs never reach a self-hosted runner.
 2. Make sure the repo can read the `ANTHROPIC_REVIEW_KEYS` secret (see below).
 
 To retry or collect a batch that outlived the job, re-run the failed **Claude review** job from the PR's checks.
