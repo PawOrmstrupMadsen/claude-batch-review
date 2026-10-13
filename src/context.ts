@@ -22,6 +22,9 @@ interface PrFile {
 }
 
 export interface ReviewContext {
+  /** Base-commit guidance files; sent in the system prompt. */
+  guidance: string;
+  /** PR text, diff and files: untrusted, sent as the user turn. */
   text: string;
   files: number;
   omitted: string[];
@@ -33,6 +36,13 @@ const MAX_GUIDANCE_CHARS = 40_000;
 const GENERATED =
   /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|packages\.lock\.json|Cargo\.lock|poetry\.lock|uv\.lock|go\.sum|composer\.lock|Gemfile\.lock)$|\.min\.(js|css)$|\.(map|snap)$/;
 const GUIDANCE_NAMES = ["CLAUDE.md", "AGENTS.md"];
+const FETCH_CONCURRENCY = 8;
+
+interface TreeEntry {
+  path: string;
+  type: string;
+  size?: number;
+}
 
 export async function buildContext(
   gh: GitHub,
@@ -44,20 +54,23 @@ export async function buildContext(
   const files = await gh.paginate<PrFile>(`${repo}/pulls/${pr.number}/files`);
   const omitted: string[] = [];
   let budget = maxInputTokens * CHARS_PER_TOKEN;
+  const guidance: string[] = [];
   const parts: string[] = [];
-  const add = (s: string) => {
-    parts.push(s);
+  const add = (into: string[], s: string) => {
+    into.push(s);
     budget -= s.length;
   };
 
-  // Guidance comes from the base branch, so a PR cannot rewrite its own review instructions.
-  for (const path of await guidancePaths(gh, pr, files, promptFile)) {
+  // Guidance comes from the base commit, so a PR cannot rewrite its own review instructions.
+  const baseTree = await tree(gh, pr.base.sha);
+  for (const path of guidancePaths(baseTree, files, promptFile)) {
     const content = await gh.file(path, pr.base.sha);
     if (content === null) continue;
-    add(`<repository_guidance path="${path}">\n${clip(content, MAX_GUIDANCE_CHARS)}\n</repository_guidance>\n`);
+    add(guidance, `<repository_guidance path="${path}">\n${clip(content, MAX_GUIDANCE_CHARS)}\n</repository_guidance>\n`);
   }
 
   add(
+    parts,
     `<pull_request number="${pr.number}" author="${pr.user.login}" base="${pr.base.ref}" head="${pr.head.ref}">\n` +
       `<title>${pr.title}</title>\n<description>\n${clip(pr.body ?? "", 20_000)}\n</description>\n` +
       `<changed_files>\n${files.map((f) => `${f.status}\t+${f.additions} -${f.deletions}\t${f.previous_filename ? `${f.previous_filename} -> ` : ""}${f.filename}`).join("\n")}\n</changed_files>\n</pull_request>\n`,
@@ -75,32 +88,52 @@ export async function buildContext(
     p.text = `${p.text.slice(0, keep)}\n… [diff truncated: ${p.text.length - keep} more characters]\n`;
     omitted.push(`part of the diff of \`${p.f.filename}\``);
   }
-  add(`<diff>\n${patches.map((p) => p.text).join("")}</diff>\n`);
+  add(parts, `<diff>\n${patches.map((p) => p.text).join("")}</diff>\n`);
 
-  // Full post-change files, smallest first, while they fit.
-  const candidates = files.filter((f) => f.status !== "removed" && f.patch !== undefined && !GENERATED.test(f.filename));
-  const contents = await Promise.all(
-    candidates.map(async (f) => ({ f, content: await gh.file(f.filename, pr.head.sha).catch(() => null) })),
-  );
-  contents.sort((a, b) => (a.content?.length ?? 0) - (b.content?.length ?? 0));
-  for (const { f, content } of contents) {
-    if (content === null) continue;
+  // Full post-change files, smallest first (blob sizes from the head tree), while they fit.
+  const sizes = new Map((await tree(gh, pr.head.sha)).map((e) => [e.path, e.size ?? 0]));
+  const queue = files
+    .filter((f) => f.status !== "removed" && f.patch !== undefined && !GENERATED.test(f.filename))
+    .map((f) => ({ f, size: sizes.get(f.filename) ?? 0 }))
+    .sort((a, b) => a.size - b.size);
+  let reserved = 0;
+  const picked: typeof queue = [];
+  for (const q of queue) {
+    // Line numbers add roughly 10 %.
+    const cost = Math.ceil(q.size * 1.1) + 64;
+    if (q.size > MAX_FULL_FILE_CHARS || reserved + cost > budget) omitted.push(`full text of \`${q.f.filename}\``);
+    else {
+      picked.push(q);
+      reserved += cost;
+    }
+  }
+  const fetched = await mapLimit(picked, FETCH_CONCURRENCY, async ({ f }) => ({
+    f,
+    content: await gh.file(f.filename, pr.head.sha).catch(() => null),
+  }));
+  for (const { f, content } of fetched) {
+    if (content === null) {
+      omitted.push(`full text of \`${f.filename}\` (fetch failed)`);
+      continue;
+    }
     const numbered = numberLines(content);
-    if (content.length > MAX_FULL_FILE_CHARS || numbered.length > budget) {
+    if (numbered.length > budget) {
       omitted.push(`full text of \`${f.filename}\``);
       continue;
     }
-    add(`<file path="${f.filename}" ref="head">\n${numbered}</file>\n`);
+    add(parts, `<file path="${f.filename}" ref="head">\n${numbered}</file>\n`);
   }
 
-  return { text: parts.join("\n"), files: files.length, omitted };
+  return { guidance: guidance.join("\n"), text: parts.join("\n"), files: files.length, omitted };
 }
 
-async function guidancePaths(gh: GitHub, pr: Pull, files: PrFile[], promptFile: string): Promise<string[]> {
-  const tree = await gh.json<{ tree: { path: string; type: string }[] }>(
-    `/repos/${gh.owner}/${gh.repo}/git/trees/${pr.base.sha}?recursive=1`,
-  );
-  const present = new Set(tree.tree.filter((e) => e.type === "blob").map((e) => e.path));
+async function tree(gh: GitHub, sha: string): Promise<TreeEntry[]> {
+  const t = await gh.json<{ tree: TreeEntry[] }>(`/repos/${gh.owner}/${gh.repo}/git/trees/${sha}?recursive=1`);
+  return t.tree.filter((e) => e.type === "blob");
+}
+
+function guidancePaths(blobs: TreeEntry[], files: PrFile[], promptFile: string): string[] {
+  const present = new Set(blobs.map((e) => e.path));
   const dirs = new Set<string>([""]);
   for (const f of files) {
     const segs = f.filename.split("/").slice(0, -1);
@@ -132,4 +165,17 @@ function numberLines(content: string): string {
 
 function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}\n… [${s.length - max} more characters not shown]`;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }

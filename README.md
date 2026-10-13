@@ -11,7 +11,8 @@ It is advisory: the job is `continue-on-error` and never blocks a merge.
 ## Add it to a repo
 
 1. Copy [`examples/claude-review.yml`](examples/claude-review.yml) to `.github/workflows/claude-review.yml`.
-   Set `runs-on` to the repo's own runners if it has any; the job only waits on the network.
+   Replace `<repo-label>` in `runs-on` with the repo's own runner label (never a deploy runner). The job only
+   waits on the network, holding the runner for the few minutes a batch takes.
 2. Make sure the repo can read the `ANTHROPIC_REVIEW_KEYS` secret (see below).
 
 Re-review by hand: Actions → Claude review → Run workflow → PR number (tick *force* to redo a commit that
@@ -45,12 +46,14 @@ after creating a new personal repo.
 ## How it works
 
 1. Reads the PR, its file list and patches through the GitHub API, plus `CLAUDE.md` / `AGENTS.md` (root
-   and every directory above a changed file) and `.github/claude-review.md` **from the base commit**, so a
-   PR cannot rewrite its own review rules.
+   and every directory above a changed file) and `.github/claude-review.md` **from the base commit**. The
+   guidance goes into the system prompt and the PR into the user turn, so a PR can neither rewrite nor
+   imitate its review rules.
 2. Builds one request: guidance, PR text, the diff (largest patches cut first if it would take more than
    60 % of the budget), then the full post-change files with line numbers, smallest first, while they fit
-   in `max-input-tokens`. Lock files and minified files only show their line counts. Anything left out is
-   listed in the comment.
+   in `max-input-tokens` (blob sizes come from the head tree; at most 8 fetches at a time). Lock files and
+   minified files only show their line counts. Anything left out, or whose fetch failed, is listed in the
+   comment.
 3. Submits a one-request batch (adaptive thinking, `effort: high`) and writes a "queued" comment holding
    the batch id, the head SHA and a fingerprint of the key (first 8 hex of its SHA-256, never the key).
 4. Polls until the batch ends or `max-wait-minutes` passes. A run that finds a pending batch for the same
@@ -65,9 +68,10 @@ the network, so prompt injection in a diff can at worst skew the review text.
 ## Cost and timing
 
 A typical PR (30K tokens in, 4K out, thinking included) costs about $0.10 on Opus 5.5 at batch prices
-($2 / $10 per million tokens). Batches usually end within minutes, at most 24 hours. On GitHub-hosted
-runners in private repos the wait counts as Actions minutes; lower `max-wait-minutes` there or use a
-self-hosted runner, and re-run the workflow later to collect a batch that outlived the job.
+($2 / $10 per million tokens). Batches usually end within minutes (the first one here took 3½), at most 24
+hours; re-run the workflow later to collect a batch that outlived the job. On GitHub-hosted runners a
+private repo pays Actions minutes for the wait, so callers use self-hosted runners; this public repo's own
+jobs run on `ubuntu-latest` for free.
 
 ## Development
 

@@ -25,7 +25,9 @@ permissions:
 jobs:
   review:
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot')
-    runs-on: ubuntu-latest
+    # A self-hosted runner of this repo (never a deploy runner). The job only waits on the network.
+    # GitHub-hosted runners (ubuntu-latest) work too, but cost Actions minutes in a private repo.
+    runs-on: [self-hosted, linux, x64, <repo-label>]
     timeout-minutes: 30
     continue-on-error: true
     steps:
