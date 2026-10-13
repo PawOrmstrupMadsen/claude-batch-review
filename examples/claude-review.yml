@@ -16,7 +16,8 @@ on:
         default: false
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
+  # Label events get their own group, so adding a label never cancels a review that is still waiting.
+  group: claude-review-${{ github.event.pull_request.number || inputs.pr }}-${{ contains(github.event.action, 'labeled') && 'label' || 'review' }}
   cancel-in-progress: true
 
 permissions:
