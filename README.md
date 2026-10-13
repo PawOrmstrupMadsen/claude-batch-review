@@ -57,9 +57,9 @@ key there, push it everywhere with:
 scripts/sync-keys.sh
 ```
 
-That sets the WhistleSafe organisation secret (visible to all its repos) and a repository secret on every
-non-archived personal repo, because personal accounts have no account-wide Actions secrets. Run it again
-after creating a new personal repo.
+That sets a repository secret on every non-archived repo of the personal account and the WhistleSafe
+org: personal accounts have no account-wide Actions secrets, and on GitHub Free an organisation secret does
+not reach private repos. Run it again after creating a repo.
 
 ## How it works
 
