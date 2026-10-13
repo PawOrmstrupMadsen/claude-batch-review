@@ -11,8 +11,10 @@ The `mode` input decides whether it can block a merge:
 | `mode` | The job fails when |
 |---|---|
 | `advisory` (default) | never (only on a crash) |
-| `complete` | no review is posted for the head commit: keys out of credit, an error, or the batch outlived `max-wait-minutes` |
-| `pass` | as `complete`, or the verdict is ❌ Changes needed and the PR lacks the `override-label` (`review-override`) |
+| `complete` | no review is posted for the head commit: no keys, keys out of credit, an error, or the batch outlived `max-wait-minutes` |
+| `pass` | as `complete`, or the verdict is ❌ Changes needed, or the review has no recognisable verdict line |
+
+In `complete` and `pass`, the PR label named by `override-label` (`review-override`) lets any of these through.
 
 The example workflow uses `pass` and names the job **Claude review**; add that name as a required status
 check in the repo's ruleset to make it a merge gate. The verdict is stored with the review, so re-running

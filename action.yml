@@ -39,10 +39,10 @@ inputs:
     description: "'true' re-reviews a head commit that already has a review."
     default: 'false'
   mode:
-    description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict, unless the PR has the override label."
+    description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict or a review without a verdict line. The override label lets either mode through."
     default: advisory
   override-label:
-    description: PR label that lets a ❌ verdict pass in mode `pass`.
+    description: PR label that lets the job pass in modes `complete` and `pass` whatever the review says.
     default: review-override
   comment-author:
     description: Login that owns the sticky comment; change it only when github-token is not the Actions token.

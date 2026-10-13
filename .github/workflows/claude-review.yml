@@ -3,7 +3,7 @@ name: Claude review
 # examples/claude-review.yml instead.
 on:
   pull_request:
-    # labeled/unlabeled re-evaluate the override label; they reuse the stored review and cost nothing.
+    # labeled/unlabeled re-evaluate the override label, reusing the head commit's stored review.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
     inputs:

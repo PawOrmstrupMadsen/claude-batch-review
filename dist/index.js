@@ -21210,10 +21210,6 @@ var PRICES = {
 async function run() {
   const keys = input("api-keys").split(/\r?\n/).map((k) => k.trim()).filter((k) => k && !k.startsWith("#"));
   keys.forEach(log.mask);
-  if (keys.length === 0) {
-    log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
-    return { status: "skipped" };
-  }
   const slots = keys.map((key) => ({
     key,
     fp: createHash("sha256").update(key).digest("hex").slice(0, 8),
@@ -21235,13 +21231,17 @@ async function run() {
     force: input("force") === "true"
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
+  if (keys.length === 0) {
+    log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
+    return { status: "skipped", overridden };
+  }
   const sha7 = pr.head.sha.slice(0, 7);
   let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
   const prior = comment ? parseState(comment.body) : null;
   let job = null;
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
     log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
-    return { status: "done", verdict: prior.verdict ?? "unknown", overridden };
+    return { status: "done", verdict: prior.verdict ?? parseVerdict(comment?.body ?? ""), overridden };
   }
   if (prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
@@ -21310,7 +21310,7 @@ async function run() {
   const fail = async (model, why) => {
     await upsert({ status: "failed", sha: pr.head.sha }, `${header(model)}\u26A0\uFE0F No review: ${why}`);
     log.warning(why);
-    return { status: "failed" };
+    return { status: "failed", overridden };
   };
   const review = async () => {
     if (!job) {
@@ -21324,7 +21324,7 @@ async function run() {
       const batch = await waitForBatch(client, job.batch, deadline);
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 6e4} min; re-run the workflow to collect it.`);
-        return { status: "pending" };
+        return { status: "pending", overridden };
       }
       let result = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
@@ -21342,12 +21342,9 @@ async function run() {
         const text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n\n").trim();
         const truncated = msg.stop_reason === "max_tokens" ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
         const verdict = parseVerdict(text);
-        const note = verdict === "changes" && overridden ? `
-
-> The \`${overrideLabel}\` label is set: this verdict does not block the merge.` : "";
         await upsert(
           { status: "done", verdict, sha: pr.head.sha, model: msg.model },
-          `${header(msg.model)}${text || "_Empty response._"}${truncated}${note}
+          `${header(msg.model)}${text || "_Empty response._"}${truncated}
 
 ${footer(msg, job, batch, slots.length, await context())}`
         );
@@ -21444,21 +21441,30 @@ function eventPr() {
 }
 var mode = input("mode", "advisory");
 var overrideLabel = input("override-label", "review-override");
-run().then(({ status, verdict, overridden }) => {
-  setOutput("status", status);
-  setOutput("verdict", verdict ?? "");
-  if (mode === "advisory") return;
-  if (status !== "done") {
-    log.error(`No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`);
-    process.exitCode = 1;
-  } else if (mode === "pass" && verdict === "changes") {
-    if (overridden) log.notice(`Changes needed, but the \`${overrideLabel}\` label overrides it.`);
+function blocker({ status, verdict }) {
+  if (mode === "advisory") return null;
+  if (status !== "done") return `No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`;
+  if (mode === "pass" && verdict === "changes") return "The review asks for changes. Fix them and push.";
+  if (mode === "pass" && verdict === "unknown") return "The review has no recognisable verdict line. Re-run with force to redo it.";
+  return null;
+}
+if (!["advisory", "complete", "pass"].includes(mode)) {
+  log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
+  process.exitCode = 1;
+} else {
+  run().then((outcome) => {
+    setOutput("status", outcome.status);
+    setOutput("verdict", outcome.verdict ?? "");
+    const why = blocker(outcome);
+    if (!why) return;
+    if (outcome.overridden) log.notice(`${why} The \`${overrideLabel}\` label overrides it.`);
     else {
-      log.error(`The review asks for changes. Fix them and push, or add the \`${overrideLabel}\` label to merge anyway.`);
+      log.error(`${why} To merge anyway, add the \`${overrideLabel}\` label.`);
       process.exitCode = 1;
     }
-  }
-}).catch((e) => {
-  log.error(e instanceof Error ? e.stack ?? e.message : String(e));
-  process.exitCode = 1;
-});
+  }).catch((e) => {
+    setOutput("status", "failed");
+    log.error(e instanceof Error ? e.stack ?? e.message : String(e));
+    process.exitCode = 1;
+  });
+}
