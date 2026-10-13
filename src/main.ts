@@ -141,7 +141,7 @@ async function run(): Promise<Outcome> {
     for (let i = from; i < slots.length; i++) {
       try {
         const batch = await slots[i].client.messages.batches.create({
-          requests: [{ custom_id: `${owner}-${repo}-${prNumber}-${sha7}`.slice(0, 64), params }],
+          requests: [{ custom_id: `${owner}-${repo}-${prNumber}-${sha7}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64), params }],
         });
         log.info(`Submitted ${batch.id} on key ${i + 1}/${slots.length} (${model}).`);
         return { batch: batch.id, slot: i, model, submitted: batch.created_at };
