@@ -1,0 +1,27 @@
+{
+  "name": "claude-batch-review",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/index.js --banner:js=\"import { createRequire } from \\\"node:module\\\"; const require = createRequire(import.meta.url);\"",
+    "check": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PawOrmstrupMadsen/claude-batch-review.git"
+  },
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/PawOrmstrupMadsen/claude-batch-review/issues"
+  },
+  "homepage": "https://github.com/PawOrmstrupMadsen/claude-batch-review#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "license": "MIT"
+}
