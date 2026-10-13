@@ -11,8 +11,8 @@ org=${ORG:-WhistleSafe}
 user=${GH_USER:-PawOrmstrupMadsen}
 name=ANTHROPIC_REVIEW_KEYS
 
-[[ -s $keys ]] || { echo "no keys in $keys" >&2; exit 1; }
-count=$(grep -cv '^\s*\(#\|$\)' "$keys")
+count=$(grep -cv '^\s*\(#\|$\)' "$keys" 2>/dev/null || true)
+[[ ${count:-0} -gt 0 ]] || { echo "no keys in $keys" >&2; exit 1; }
 echo "$count key(s) from $keys"
 
 gh secret set "$name" --org "$org" --visibility all < "$keys"

@@ -63,7 +63,7 @@ export async function buildContext(
 
   // Guidance comes from the base commit, so a PR cannot rewrite its own review instructions.
   const baseTree = await tree(gh, pr.base.sha);
-  for (const path of guidancePaths(baseTree, files, promptFile)) {
+  for (const path of guidancePaths(baseTree.truncated ? null : baseTree.blobs, files, promptFile)) {
     const content = await gh.file(path, pr.base.sha);
     if (content === null) continue;
     add(guidance, `<repository_guidance path="${path}">\n${clip(content, MAX_GUIDANCE_CHARS)}\n</repository_guidance>\n`);
@@ -88,10 +88,19 @@ export async function buildContext(
     p.text = `${p.text.slice(0, keep)}\n… [diff truncated: ${p.text.length - keep} more characters]\n`;
     omitted.push(`part of the diff of \`${p.f.filename}\``);
   }
+  // Still over: many small patches. Replace the smallest with stubs until it fits.
+  for (const p of [...patches].sort((a, b) => a.text.length - b.text.length)) {
+    if (diffSize <= diffBudget) break;
+    const stub = `--- ${p.f.filename}\n[diff not shown: over the token cap]\n`;
+    if (stub.length >= p.text.length) continue;
+    diffSize -= p.text.length - stub.length;
+    p.text = stub;
+    omitted.push(`diff of \`${p.f.filename}\``);
+  }
   add(parts, `<diff>\n${patches.map((p) => p.text).join("")}</diff>\n`);
 
   // Full post-change files, smallest first (blob sizes from the head tree), while they fit.
-  const sizes = new Map((await tree(gh, pr.head.sha)).map((e) => [e.path, e.size ?? 0]));
+  const sizes = new Map((await tree(gh, pr.head.sha)).blobs.map((e) => [e.path, e.size ?? 0]));
   const queue = files
     .filter((f) => f.status !== "removed" && f.patch !== undefined && !GENERATED.test(f.filename))
     .map((f) => ({ f, size: sizes.get(f.filename) ?? 0 }))
@@ -127,13 +136,17 @@ export async function buildContext(
   return { guidance: guidance.join("\n"), text: parts.join("\n"), files: files.length, omitted };
 }
 
-async function tree(gh: GitHub, sha: string): Promise<TreeEntry[]> {
-  const t = await gh.json<{ tree: TreeEntry[] }>(`/repos/${gh.owner}/${gh.repo}/git/trees/${sha}?recursive=1`);
-  return t.tree.filter((e) => e.type === "blob");
+async function tree(gh: GitHub, sha: string): Promise<{ blobs: TreeEntry[]; truncated: boolean }> {
+  const t = await gh.json<{ tree: TreeEntry[]; truncated: boolean }>(
+    `/repos/${gh.owner}/${gh.repo}/git/trees/${sha}?recursive=1`,
+  );
+  return { blobs: t.tree.filter((e) => e.type === "blob"), truncated: t.truncated };
 }
 
-function guidancePaths(blobs: TreeEntry[], files: PrFile[], promptFile: string): string[] {
-  const present = new Set(blobs.map((e) => e.path));
+/** Candidate guidance paths; with no listing (truncated tree) every candidate is tried and 404s skipped. */
+function guidancePaths(blobs: TreeEntry[] | null, files: PrFile[], promptFile: string): string[] {
+  const present = blobs ? new Set(blobs.map((e) => e.path)) : null;
+  const has = (p: string) => present === null || present.has(p);
   const dirs = new Set<string>([""]);
   for (const f of files) {
     const segs = f.filename.split("/").slice(0, -1);
@@ -142,9 +155,9 @@ function guidancePaths(blobs: TreeEntry[], files: PrFile[], promptFile: string):
   const paths = [...dirs]
     .sort((a, b) => a.length - b.length)
     .flatMap((d) => GUIDANCE_NAMES.map((n) => (d ? `${d}/${n}` : n)))
-    .filter((p) => present.has(p));
+    .filter(has);
   for (const extra of [".github/claude-review.md", promptFile]) {
-    if (extra && present.has(extra) && !paths.includes(extra)) paths.push(extra);
+    if (extra && has(extra) && !paths.includes(extra)) paths.push(extra);
   }
   return paths;
 }

@@ -52,7 +52,7 @@ after creating a new personal repo.
 2. Builds one request: guidance, PR text, the diff (largest patches cut first if it would take more than
    60 % of the budget), then the full post-change files with line numbers, smallest first, while they fit
    in `max-input-tokens` (blob sizes come from the head tree; at most 8 fetches at a time). Lock files and
-   minified files only show their line counts. Anything left out, or whose fetch failed, is listed in the
+   minified files only show their added/removed line counts. Anything left out, or whose fetch failed, is listed in the
    comment.
 3. Submits a one-request batch (adaptive thinking, `effort: high`) and writes a "queued" comment holding
    the batch id, the head SHA and a fingerprint of the key (first 8 hex of its SHA-256, never the key).

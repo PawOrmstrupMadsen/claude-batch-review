@@ -20960,7 +20960,7 @@ async function buildContext(gh, pr, maxInputTokens, promptFile) {
     budget -= s.length;
   };
   const baseTree = await tree(gh, pr.base.sha);
-  for (const path4 of guidancePaths(baseTree, files, promptFile)) {
+  for (const path4 of guidancePaths(baseTree.truncated ? null : baseTree.blobs, files, promptFile)) {
     const content = await gh.file(path4, pr.base.sha);
     if (content === null) continue;
     add(guidance, `<repository_guidance path="${path4}">
@@ -20994,10 +20994,20 @@ ${files.map((f) => `${f.status}	+${f.additions} -${f.deletions}	${f.previous_fil
 `;
     omitted.push(`part of the diff of \`${p.f.filename}\``);
   }
+  for (const p of [...patches].sort((a, b) => a.text.length - b.text.length)) {
+    if (diffSize <= diffBudget) break;
+    const stub = `--- ${p.f.filename}
+[diff not shown: over the token cap]
+`;
+    if (stub.length >= p.text.length) continue;
+    diffSize -= p.text.length - stub.length;
+    p.text = stub;
+    omitted.push(`diff of \`${p.f.filename}\``);
+  }
   add(parts, `<diff>
 ${patches.map((p) => p.text).join("")}</diff>
 `);
-  const sizes = new Map((await tree(gh, pr.head.sha)).map((e) => [e.path, e.size ?? 0]));
+  const sizes = new Map((await tree(gh, pr.head.sha)).blobs.map((e) => [e.path, e.size ?? 0]));
   const queue = files.filter((f) => f.status !== "removed" && f.patch !== void 0 && !GENERATED.test(f.filename)).map((f) => ({ f, size: sizes.get(f.filename) ?? 0 })).sort((a, b) => a.size - b.size);
   let reserved = 0;
   const picked = [];
@@ -21030,19 +21040,22 @@ ${numbered}</file>
   return { guidance: guidance.join("\n"), text: parts.join("\n"), files: files.length, omitted };
 }
 async function tree(gh, sha) {
-  const t = await gh.json(`/repos/${gh.owner}/${gh.repo}/git/trees/${sha}?recursive=1`);
-  return t.tree.filter((e) => e.type === "blob");
+  const t = await gh.json(
+    `/repos/${gh.owner}/${gh.repo}/git/trees/${sha}?recursive=1`
+  );
+  return { blobs: t.tree.filter((e) => e.type === "blob"), truncated: t.truncated };
 }
 function guidancePaths(blobs, files, promptFile) {
-  const present = new Set(blobs.map((e) => e.path));
+  const present = blobs ? new Set(blobs.map((e) => e.path)) : null;
+  const has2 = (p) => present === null || present.has(p);
   const dirs = /* @__PURE__ */ new Set([""]);
   for (const f of files) {
     const segs = f.filename.split("/").slice(0, -1);
     for (let i = 1; i <= segs.length; i++) dirs.add(segs.slice(0, i).join("/"));
   }
-  const paths = [...dirs].sort((a, b) => a.length - b.length).flatMap((d) => GUIDANCE_NAMES.map((n) => d ? `${d}/${n}` : n)).filter((p) => present.has(p));
+  const paths = [...dirs].sort((a, b) => a.length - b.length).flatMap((d) => GUIDANCE_NAMES.map((n) => d ? `${d}/${n}` : n)).filter(has2);
   for (const extra of [".github/claude-review.md", promptFile]) {
-    if (extra && present.has(extra) && !paths.includes(extra)) paths.push(extra);
+    if (extra && has2(extra) && !paths.includes(extra)) paths.push(extra);
   }
   return paths;
 }
