@@ -1,0 +1,49 @@
+name: Claude batch review
+description: Reviews a pull request with Claude through the Message Batches API (half price), rotating across several API keys.
+author: Paw Ormstrup Madsen
+branding:
+  icon: eye
+  color: orange
+inputs:
+  api-keys:
+    description: Anthropic API keys, one per line, used in order; a key that is out of credit is skipped. Lines starting with '#' are ignored.
+    required: true
+  github-token:
+    description: Token that reads the PR and writes its comment.
+    default: ${{ github.token }}
+  pr:
+    description: Pull request number. Defaults to the triggering pull_request event.
+    default: ''
+  model:
+    description: Model id.
+    default: claude-opus-5-5
+  fallback-model:
+    description: Model the request is resubmitted to when the main model declines it.
+    default: claude-opus-4-8
+  effort:
+    description: low, medium, high, xhigh or max.
+    default: high
+  max-input-tokens:
+    description: Approximate cap on the prompt; the largest diffs and full files are left out beyond it, and the comment lists what was left out.
+    default: '300000'
+  max-output-tokens:
+    description: max_tokens of the request (thinking included).
+    default: '32000'
+  max-wait-minutes:
+    description: How long the job waits for the batch. A later run for the same head commit resumes the pending batch.
+    default: '20'
+  prompt-file:
+    description: Extra review instructions in the calling repo, read from the PR's base commit. `.github/claude-review.md` is always picked up when present.
+    default: ''
+  force:
+    description: "'true' re-reviews a head commit that already has a review."
+    default: 'false'
+  comment-author:
+    description: Login that owns the sticky comment; change it only when github-token is not the Actions token.
+    default: github-actions[bot]
+outputs:
+  status:
+    description: done, pending (batch still running when the wait ran out), failed or skipped.
+runs:
+  using: node24
+  main: dist/index.js

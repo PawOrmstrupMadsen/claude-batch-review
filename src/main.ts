@@ -1,0 +1,282 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { buildContext, type Pull, type ReviewContext } from "./context.js";
+import { GitHub, input, log, setOutput } from "./github.js";
+import { SYSTEM_PROMPT } from "./prompt.js";
+
+const MARKER = "<!-- claude-batch-review";
+
+/** List price per million tokens (input, output); the Batches API bills half of it. */
+const PRICES: Record<string, [number, number]> = {
+  "claude-fable-5-1": [10, 50],
+  "claude-opus-5-5": [4, 20],
+  "claude-opus-5": [5, 25],
+  "claude-opus-4-8": [5, 25],
+  "claude-sonnet-5-5": [2, 10],
+  "claude-haiku-5-5": [0.1, 0.5],
+};
+
+interface Slot {
+  key: string;
+  fp: string;
+  client: Anthropic;
+}
+
+interface State {
+  status: "pending" | "done" | "failed";
+  sha: string;
+  batch?: string;
+  key?: string;
+  model?: string;
+  submitted?: string;
+}
+
+interface Job {
+  batch: string;
+  slot: number;
+  model: string;
+  submitted: string;
+}
+
+interface Comment {
+  id: number;
+  body: string;
+  user: { login: string } | null;
+}
+
+async function run(): Promise<void> {
+  const keys = input("api-keys")
+    .split(/\r?\n/)
+    .map((k) => k.trim())
+    .filter((k) => k && !k.startsWith("#"));
+  keys.forEach(log.mask);
+  if (keys.length === 0) {
+    log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
+    setOutput("status", "skipped");
+    return;
+  }
+  const slots: Slot[] = keys.map((key) => ({
+    key,
+    fp: createHash("sha256").update(key).digest("hex").slice(0, 8),
+    client: new Anthropic({ apiKey: key, maxRetries: 4 }),
+  }));
+
+  const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
+  const gh = new GitHub(input("github-token"), owner, repo);
+  const prNumber = Number(input("pr") || eventPr());
+  if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
+  const pr = await gh.json<Pull>(`/repos/${owner}/${repo}/pulls/${prNumber}`);
+
+  const cfg = {
+    model: input("model", "claude-opus-5-5"),
+    fallbackModel: input("fallback-model", "claude-opus-4-8"),
+    effort: input("effort", "high") as "low" | "medium" | "high" | "xhigh" | "max",
+    maxOutputTokens: Number(input("max-output-tokens", "32000")),
+    maxInputTokens: Number(input("max-input-tokens", "300000")),
+    maxWaitMs: Number(input("max-wait-minutes", "20")) * 60_000,
+    promptFile: input("prompt-file"),
+    force: input("force") === "true",
+  };
+  const sha7 = pr.head.sha.slice(0, 7);
+
+  let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
+  const prior = comment ? parseState(comment.body) : null;
+  let job: Job | null = null;
+
+  if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
+    log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
+    setOutput("status", "done");
+    return;
+  }
+  if (prior?.status === "pending" && prior.batch) {
+    const slot = slots.findIndex((s) => s.fp === prior.key);
+    if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
+      job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted: prior.submitted ?? "" };
+      log.info(`Resuming batch ${job.batch} for ${sha7}.`);
+    } else if (slot >= 0) {
+      await slots[slot].client.messages.batches.cancel(prior.batch).then(
+        () => log.info(`Canceled superseded batch ${prior.batch} (${prior.sha.slice(0, 7)}).`),
+        (e: unknown) => log.info(`Could not cancel ${prior.batch}: ${String(e)}`),
+      );
+    }
+  }
+
+  let ctx: ReviewContext | null = null;
+  const context = async () => (ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile));
+
+  const submit = async (from: number, model: string): Promise<Job | null> => {
+    const c = await context();
+    const params: Anthropic.Messages.MessageCreateParamsNonStreaming = {
+      model,
+      max_tokens: cfg.maxOutputTokens,
+      thinking: { type: "adaptive" },
+      output_config: { effort: cfg.effort },
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: c.text }],
+    };
+    for (let i = from; i < slots.length; i++) {
+      try {
+        const batch = await slots[i].client.messages.batches.create({
+          requests: [{ custom_id: `${owner}-${repo}-${prNumber}-${sha7}`.slice(0, 64), params }],
+        });
+        log.info(`Submitted ${batch.id} on key ${i + 1}/${slots.length} (${model}).`);
+        return { batch: batch.id, slot: i, model, submitted: batch.created_at };
+      } catch (e) {
+        if (!(e instanceof Anthropic.APIError) || !keyUnusable(e.status, e.type, e.message)) throw e;
+        log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} — ${e.message}`);
+      }
+    }
+    return null;
+  };
+
+  const upsert = async (state: State, body: string) => {
+    const full = `${MARKER} ${JSON.stringify(state)} -->\n${body}`;
+    const base = `/repos/${owner}/${repo}/issues`;
+    if (comment) {
+      await gh.json(`${base}/comments/${comment.id}`, { method: "PATCH", body: JSON.stringify({ body: full }) });
+      comment.body = full;
+    } else {
+      comment = await gh.json<Comment>(`${base}/${prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: full }) });
+    }
+  };
+  const header = (model: string) => `## Claude review · \`${model}\` · ${sha7}\n\n`;
+
+  const queue = async (j: Job) =>
+    upsert(
+      { status: "pending", sha: pr.head.sha, batch: j.batch, key: slots[j.slot].fp, model: j.model, submitted: j.submitted },
+      `${header(j.model)}⏳ Queued in batch \`${j.batch}\` (key ${j.slot + 1}/${slots.length}). ` +
+        "This comment becomes the review when the batch ends. If the workflow times out first, re-run it to collect the result.",
+    );
+  const fail = async (model: string, why: string) => {
+    await upsert({ status: "failed", sha: pr.head.sha }, `${header(model)}⚠️ No review: ${why}`);
+    log.warning(why);
+    setOutput("status", "failed");
+  };
+
+  if (!job) {
+    job = await submit(0, cfg.model);
+    if (!job) return fail(cfg.model, `none of the ${slots.length} API keys has credit left. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
+    await queue(job);
+  }
+
+  const deadline = Date.now() + cfg.maxWaitMs;
+  for (let round = 0; round < slots.length + 3; round++) {
+    const client = slots[job.slot].client;
+    const batch = await waitForBatch(client, job.batch, deadline);
+    if (!batch) {
+      log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 60_000} min; re-run the workflow to collect it.`);
+      setOutput("status", "pending");
+      return;
+    }
+    let result: Anthropic.Messages.MessageBatchResult | null = null;
+    for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
+    if (!result) return fail(job.model, `batch \`${job.batch}\` ended without a result.`);
+
+    if (result.type === "succeeded") {
+      const msg = result.message;
+      if (msg.stop_reason === "refusal" && job.model !== cfg.fallbackModel) {
+        log.warning(`${job.model} declined (${msg.stop_details?.category ?? "no category"}); retrying on ${cfg.fallbackModel}.`);
+        const next = await submit(job.slot, cfg.fallbackModel);
+        if (!next) return fail(job.model, "the model declined and no key had credit for the fallback model.");
+        await queue((job = next));
+        continue;
+      }
+      if (msg.stop_reason === "refusal") return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`);
+      const text = msg.content
+        .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("\n\n")
+        .trim();
+      const truncated = msg.stop_reason === "max_tokens" ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
+      await upsert(
+        { status: "done", sha: pr.head.sha, model: msg.model },
+        `${header(msg.model)}${text || "_Empty response._"}${truncated}\n\n${footer(msg, job, batch, slots.length, await context())}`,
+      );
+      log.info(`Posted the review for #${prNumber} @ ${sha7}.`);
+      setOutput("status", "done");
+      return;
+    }
+
+    if (result.type === "errored") {
+      const err = result.error.error;
+      if (keyUnusable(undefined, err.type, err.message)) {
+        log.warning(`Key ${job.slot + 1}/${slots.length} ran out during the batch: ${err.message}`);
+        const next = await submit(job.slot + 1, job.model);
+        if (!next) return fail(job.model, `every API key is out of credit. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
+        await queue((job = next));
+        continue;
+      }
+      return fail(job.model, `the batch request failed: \`${err.type}\` ${err.message}`);
+    }
+    return fail(job.model, `batch \`${job.batch}\` ended as \`${result.type}\`. Re-run the workflow to try again.`);
+  }
+  return fail(job.model, "gave up after too many resubmissions.");
+}
+
+/** Out of credit, revoked or not allowed: move on to the next key. */
+function keyUnusable(status: number | undefined, type: string | null | undefined, message: string): boolean {
+  if (status === 401 || status === 402 || status === 403) return true;
+  if (type === "billing_error" || type === "authentication_error" || type === "permission_error") return true;
+  // Older accounts report an empty balance as a 400 invalid_request_error; only the message tells it apart.
+  return /credit balance/i.test(message);
+}
+
+async function waitForBatch(client: Anthropic, id: string, deadline: number) {
+  for (let i = 0; ; i++) {
+    const batch = await client.messages.batches.retrieve(id);
+    if (batch.processing_status === "ended") return batch;
+    if (Date.now() > deadline) return null;
+    if (i % 4 === 0) log.info(`Batch ${id}: ${batch.processing_status}…`);
+    await new Promise((r) => setTimeout(r, i < 8 ? 15_000 : 30_000));
+  }
+}
+
+function footer(
+  msg: Anthropic.Messages.Message,
+  job: Job,
+  batch: Anthropic.Messages.MessageBatch,
+  keyCount: number,
+  ctx: ReviewContext,
+): string {
+  const u = msg.usage;
+  const input = u.input_tokens + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  const price = PRICES[msg.model];
+  const cost = price ? ` · ≈ $${((input * price[0] + u.output_tokens * price[1]) / 2 / 1e6).toFixed(3)}` : "";
+  const waited = batch.ended_at ? Math.round((Date.parse(batch.ended_at) - Date.parse(batch.created_at)) / 1000) : 0;
+  const omitted = ctx.omitted.length
+    ? `\n<details><summary>Not shown to the reviewer (token cap)</summary>\n\n${ctx.omitted.map((o) => `- ${o}`).join("\n")}\n</details>`
+    : "";
+  return (
+    `---\n<sub>Message Batches API · ${ctx.files} files · ${input.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost}` +
+    ` · batch took ${Math.floor(waited / 60)}m${waited % 60}s · key ${job.slot + 1}/${keyCount} · ` +
+    `[claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)</sub>${omitted}`
+  );
+}
+
+/** Only the action's own comment counts, so nobody else can plant a state marker. */
+async function findComment(gh: GitHub, pr: number, author: string): Promise<Comment | null> {
+  const comments = await gh.paginate<Comment>(`/repos/${gh.owner}/${gh.repo}/issues/${pr}/comments`);
+  return comments.find((c) => c.user?.login === author && c.body?.startsWith(MARKER)) ?? null;
+}
+
+function parseState(body: string): State | null {
+  const m = /^<!-- claude-batch-review (\{.*?\}) -->/.exec(body);
+  try {
+    return m ? (JSON.parse(m[1]) as State) : null;
+  } catch {
+    return null;
+  }
+}
+
+function eventPr(): string {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) return "";
+  const event = JSON.parse(readFileSync(path, "utf8")) as { pull_request?: { number: number } };
+  return String(event.pull_request?.number ?? "");
+}
+
+run().catch((e: unknown) => {
+  log.error(e instanceof Error ? (e.stack ?? e.message) : String(e));
+  process.exitCode = 1;
+});
