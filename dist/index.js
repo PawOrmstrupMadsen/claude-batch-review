@@ -3508,8 +3508,8 @@ var init_MessageStream = __esm({
             __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_beginRequest).call(this);
             const { response, data: stream2 } = await messages.create({ ...params, stream: true }, { ...options, signal: this.controller.signal }).withResponse();
             this._connected(response);
-            for await (const event of stream2) {
-              __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_addStreamEvent).call(this, event);
+            for await (const event2 of stream2) {
+              __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_addStreamEvent).call(this, event2);
             }
             if (stream2.controller.signal?.aborted) {
               throw new APIUserAbortError();
@@ -3549,8 +3549,8 @@ var init_MessageStream = __esm({
          * called, multiple times.
          * @returns this MessageStream, so that calls can be chained
          */
-        on(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event] || (__classPrivateFieldGet(this, _MessageStream_listeners, "f")[event] = []);
+        on(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2] || (__classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2] = []);
           listeners.push({ listener });
           return this;
         }
@@ -3561,8 +3561,8 @@ var init_MessageStream = __esm({
          * off() must be called multiple times to remove each instance.
          * @returns this MessageStream, so that calls can be chained
          */
-        off(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event];
+        off(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2];
           if (!listeners)
             return this;
           const index = listeners.findIndex((l) => l.listener === listener);
@@ -3575,8 +3575,8 @@ var init_MessageStream = __esm({
          * this listener is removed and then invoked.
          * @returns this MessageStream, so that calls can be chained
          */
-        once(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event] || (__classPrivateFieldGet(this, _MessageStream_listeners, "f")[event] = []);
+        once(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2] || (__classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2] = []);
           listeners.push({ listener, once: true });
           return this;
         }
@@ -3591,12 +3591,12 @@ var init_MessageStream = __esm({
          *
          *   const message = await stream.emitted('message') // rejects if the stream errors
          */
-        emitted(event) {
+        emitted(event2) {
           return new Promise((resolve2, reject) => {
             __classPrivateFieldSet(this, _MessageStream_catchingPromiseCreated, true, "f");
-            if (event !== "error")
+            if (event2 !== "error")
               this.once("error", reject);
-            this.once(event, resolve2);
+            this.once(event2, resolve2);
           });
         }
         async done() {
@@ -3624,19 +3624,19 @@ var init_MessageStream = __esm({
           await this.done();
           return __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_getFinalText).call(this);
         }
-        _emit(event, ...args) {
+        _emit(event2, ...args) {
           if (__classPrivateFieldGet(this, _MessageStream_ended, "f"))
             return;
-          if (event === "end") {
+          if (event2 === "end") {
             __classPrivateFieldSet(this, _MessageStream_ended, true, "f");
             __classPrivateFieldGet(this, _MessageStream_resolveEndPromise, "f").call(this);
           }
-          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event];
+          const listeners = __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2];
           if (listeners) {
-            __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event] = listeners.filter((l) => !l.once);
+            __classPrivateFieldGet(this, _MessageStream_listeners, "f")[event2] = listeners.filter((l) => !l.once);
             listeners.forEach(({ listener }) => listener(...args));
           }
-          if (event === "abort") {
+          if (event2 === "abort") {
             const error = args[0];
             if (!__classPrivateFieldGet(this, _MessageStream_catchingPromiseCreated, "f") && !listeners?.length) {
               Promise.reject(error);
@@ -3646,7 +3646,7 @@ var init_MessageStream = __esm({
             this._emit("end");
             return;
           }
-          if (event === "error") {
+          if (event2 === "error") {
             const error = args[0];
             if (!__classPrivateFieldGet(this, _MessageStream_catchingPromiseCreated, "f") && !listeners?.length) {
               Promise.reject(error);
@@ -3675,8 +3675,8 @@ var init_MessageStream = __esm({
             __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_beginRequest).call(this);
             this._connected(null);
             const stream2 = Stream.fromReadableStream(readableStream, this.controller);
-            for await (const event of stream2) {
-              __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_addStreamEvent).call(this, event);
+            for await (const event2 of stream2) {
+              __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_addStreamEvent).call(this, event2);
             }
             if (stream2.controller.signal?.aborted) {
               throw new APIUserAbortError();
@@ -3706,36 +3706,36 @@ var init_MessageStream = __esm({
           if (this.ended)
             return;
           __classPrivateFieldSet(this, _MessageStream_currentMessageSnapshot, void 0, "f");
-        }, _MessageStream_addStreamEvent = function _MessageStream_addStreamEvent2(event) {
+        }, _MessageStream_addStreamEvent = function _MessageStream_addStreamEvent2(event2) {
           if (this.ended)
             return;
-          const messageSnapshot = __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_accumulateMessage).call(this, event);
-          this._emit("streamEvent", event, messageSnapshot);
-          switch (event.type) {
+          const messageSnapshot = __classPrivateFieldGet(this, _MessageStream_instances, "m", _MessageStream_accumulateMessage).call(this, event2);
+          this._emit("streamEvent", event2, messageSnapshot);
+          switch (event2.type) {
             case "content_block_delta": {
               const content = messageSnapshot.content.at(-1);
-              switch (event.delta.type) {
+              switch (event2.delta.type) {
                 case "text_delta": {
                   if (content.type === "text") {
-                    this._emit("text", event.delta.text, content.text || "");
+                    this._emit("text", event2.delta.text, content.text || "");
                   }
                   break;
                 }
                 case "citations_delta": {
                   if (content.type === "text") {
-                    this._emit("citation", event.delta.citation, content.citations ?? []);
+                    this._emit("citation", event2.delta.citation, content.citations ?? []);
                   }
                   break;
                 }
                 case "input_json_delta": {
                   if (tracksToolInput(content) && __classPrivateFieldGet(this, _MessageStream_listeners, "f").inputJson?.length) {
-                    this._emit("inputJson", event.delta.partial_json, content.input);
+                    this._emit("inputJson", event2.delta.partial_json, content.input);
                   }
                   break;
                 }
                 case "thinking_delta": {
                   if (content.type === "thinking") {
-                    this._emit("thinking", event.delta.thinking, content.thinking);
+                    this._emit("thinking", event2.delta.thinking, content.thinking);
                   }
                   break;
                 }
@@ -3746,7 +3746,7 @@ var init_MessageStream = __esm({
                   break;
                 }
                 default:
-                  checkNever(event.delta);
+                  checkNever(event2.delta);
               }
               break;
             }
@@ -3777,100 +3777,100 @@ var init_MessageStream = __esm({
           }
           __classPrivateFieldSet(this, _MessageStream_currentMessageSnapshot, void 0, "f");
           return maybeParseMessage(snapshot, __classPrivateFieldGet(this, _MessageStream_params, "f"), { logger: __classPrivateFieldGet(this, _MessageStream_logger, "f") });
-        }, _MessageStream_accumulateMessage = function _MessageStream_accumulateMessage2(event) {
+        }, _MessageStream_accumulateMessage = function _MessageStream_accumulateMessage2(event2) {
           let snapshot = __classPrivateFieldGet(this, _MessageStream_currentMessageSnapshot, "f");
-          if (event.type === "message_start") {
+          if (event2.type === "message_start") {
             if (snapshot) {
-              throw new AnthropicError(`Unexpected event order, got ${event.type} before receiving "message_stop"`);
+              throw new AnthropicError(`Unexpected event order, got ${event2.type} before receiving "message_stop"`);
             }
-            return event.message;
+            return event2.message;
           }
           if (!snapshot) {
-            throw new AnthropicError(`Unexpected event order, got ${event.type} before "message_start"`);
+            throw new AnthropicError(`Unexpected event order, got ${event2.type} before "message_start"`);
           }
-          switch (event.type) {
+          switch (event2.type) {
             case "message_stop":
               return snapshot;
             case "message_delta":
-              snapshot.stop_reason = event.delta.stop_reason;
-              snapshot.stop_sequence = event.delta.stop_sequence;
-              snapshot.stop_details = event.delta.stop_details;
-              snapshot.usage.output_tokens = event.usage.output_tokens;
-              if (event.delta.container != null) {
-                snapshot.container = event.delta.container;
+              snapshot.stop_reason = event2.delta.stop_reason;
+              snapshot.stop_sequence = event2.delta.stop_sequence;
+              snapshot.stop_details = event2.delta.stop_details;
+              snapshot.usage.output_tokens = event2.usage.output_tokens;
+              if (event2.delta.container != null) {
+                snapshot.container = event2.delta.container;
               }
-              if (event.usage.input_tokens != null) {
-                snapshot.usage.input_tokens = event.usage.input_tokens;
+              if (event2.usage.input_tokens != null) {
+                snapshot.usage.input_tokens = event2.usage.input_tokens;
               }
-              if (event.usage.cache_creation_input_tokens != null) {
-                snapshot.usage.cache_creation_input_tokens = event.usage.cache_creation_input_tokens;
+              if (event2.usage.cache_creation_input_tokens != null) {
+                snapshot.usage.cache_creation_input_tokens = event2.usage.cache_creation_input_tokens;
               }
-              if (event.usage.cache_read_input_tokens != null) {
-                snapshot.usage.cache_read_input_tokens = event.usage.cache_read_input_tokens;
+              if (event2.usage.cache_read_input_tokens != null) {
+                snapshot.usage.cache_read_input_tokens = event2.usage.cache_read_input_tokens;
               }
-              if (event.usage.server_tool_use != null) {
-                snapshot.usage.server_tool_use = event.usage.server_tool_use;
+              if (event2.usage.server_tool_use != null) {
+                snapshot.usage.server_tool_use = event2.usage.server_tool_use;
               }
-              if (event.usage.output_tokens_details != null) {
-                snapshot.usage.output_tokens_details = event.usage.output_tokens_details;
+              if (event2.usage.output_tokens_details != null) {
+                snapshot.usage.output_tokens_details = event2.usage.output_tokens_details;
               }
               return snapshot;
             case "content_block_start":
-              snapshot.content.push({ ...event.content_block });
+              snapshot.content.push({ ...event2.content_block });
               return snapshot;
             case "content_block_delta": {
-              const snapshotContent = snapshot.content.at(event.index);
-              switch (event.delta.type) {
+              const snapshotContent = snapshot.content.at(event2.index);
+              switch (event2.delta.type) {
                 case "text_delta": {
                   if (snapshotContent?.type === "text") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      text: (snapshotContent.text || "") + event.delta.text
+                      text: (snapshotContent.text || "") + event2.delta.text
                     };
                   }
                   break;
                 }
                 case "citations_delta": {
                   if (snapshotContent?.type === "text") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      citations: [...snapshotContent.citations ?? [], event.delta.citation]
+                      citations: [...snapshotContent.citations ?? [], event2.delta.citation]
                     };
                   }
                   break;
                 }
                 case "input_json_delta": {
                   if (snapshotContent && tracksToolInput(snapshotContent)) {
-                    const jsonBuf = (snapshotContent[JSON_BUF_PROPERTY] || "") + event.delta.partial_json;
-                    snapshot.content[event.index] = withLazyInput(snapshotContent, jsonBuf);
+                    const jsonBuf = (snapshotContent[JSON_BUF_PROPERTY] || "") + event2.delta.partial_json;
+                    snapshot.content[event2.index] = withLazyInput(snapshotContent, jsonBuf);
                   }
                   break;
                 }
                 case "thinking_delta": {
                   if (snapshotContent?.type === "thinking") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      thinking: snapshotContent.thinking + event.delta.thinking
+                      thinking: snapshotContent.thinking + event2.delta.thinking
                     };
                   }
                   break;
                 }
                 case "signature_delta": {
                   if (snapshotContent?.type === "thinking") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      signature: event.delta.signature
+                      signature: event2.delta.signature
                     };
                   }
                   break;
                 }
                 default:
-                  checkNever(event.delta);
+                  checkNever(event2.delta);
               }
               return snapshot;
             }
             case "content_block_stop": {
-              const snapshotContent = snapshot.content.at(event.index);
+              const snapshotContent = snapshot.content.at(event2.index);
               if (snapshotContent && tracksToolInput(snapshotContent) && JSON_BUF_PROPERTY in snapshotContent) {
                 Object.defineProperty(snapshotContent, "input", {
                   value: snapshotContent.input,
@@ -3886,12 +3886,12 @@ var init_MessageStream = __esm({
           const pushQueue = [];
           const readQueue = [];
           let done = false;
-          this.on("streamEvent", (event) => {
+          this.on("streamEvent", (event2) => {
             const reader = readQueue.shift();
             if (reader) {
-              reader.resolve(event);
+              reader.resolve(event2);
             } else {
-              pushQueue.push(event);
+              pushQueue.push(event2);
             }
           });
           this.on("end", () => {
@@ -11161,8 +11161,8 @@ var init_BetaMessageStream = __esm({
             __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_beginRequest).call(this);
             const { response, data: stream2 } = await messages.create({ ...params, stream: true }, { ...options, signal: this.controller.signal }).withResponse();
             this._connected(response);
-            for await (const event of stream2) {
-              __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_addStreamEvent).call(this, event);
+            for await (const event2 of stream2) {
+              __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_addStreamEvent).call(this, event2);
             }
             if (stream2.controller.signal?.aborted) {
               throw new APIUserAbortError();
@@ -11202,8 +11202,8 @@ var init_BetaMessageStream = __esm({
          * called, multiple times.
          * @returns this MessageStream, so that calls can be chained
          */
-        on(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event] || (__classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event] = []);
+        on(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2] || (__classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2] = []);
           listeners.push({ listener });
           return this;
         }
@@ -11214,8 +11214,8 @@ var init_BetaMessageStream = __esm({
          * off() must be called multiple times to remove each instance.
          * @returns this MessageStream, so that calls can be chained
          */
-        off(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event];
+        off(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2];
           if (!listeners)
             return this;
           const index = listeners.findIndex((l) => l.listener === listener);
@@ -11228,8 +11228,8 @@ var init_BetaMessageStream = __esm({
          * this listener is removed and then invoked.
          * @returns this MessageStream, so that calls can be chained
          */
-        once(event, listener) {
-          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event] || (__classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event] = []);
+        once(event2, listener) {
+          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2] || (__classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2] = []);
           listeners.push({ listener, once: true });
           return this;
         }
@@ -11244,12 +11244,12 @@ var init_BetaMessageStream = __esm({
          *
          *   const message = await stream.emitted('message') // rejects if the stream errors
          */
-        emitted(event) {
+        emitted(event2) {
           return new Promise((resolve2, reject) => {
             __classPrivateFieldSet(this, _BetaMessageStream_catchingPromiseCreated, true, "f");
-            if (event !== "error")
+            if (event2 !== "error")
               this.once("error", reject);
-            this.once(event, resolve2);
+            this.once(event2, resolve2);
           });
         }
         async done() {
@@ -11277,19 +11277,19 @@ var init_BetaMessageStream = __esm({
           await this.done();
           return __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_getFinalText).call(this);
         }
-        _emit(event, ...args) {
+        _emit(event2, ...args) {
           if (__classPrivateFieldGet(this, _BetaMessageStream_ended, "f"))
             return;
-          if (event === "end") {
+          if (event2 === "end") {
             __classPrivateFieldSet(this, _BetaMessageStream_ended, true, "f");
             __classPrivateFieldGet(this, _BetaMessageStream_resolveEndPromise, "f").call(this);
           }
-          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event];
+          const listeners = __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2];
           if (listeners) {
-            __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event] = listeners.filter((l) => !l.once);
+            __classPrivateFieldGet(this, _BetaMessageStream_listeners, "f")[event2] = listeners.filter((l) => !l.once);
             listeners.forEach(({ listener }) => listener(...args));
           }
-          if (event === "abort") {
+          if (event2 === "abort") {
             const error = args[0];
             if (!__classPrivateFieldGet(this, _BetaMessageStream_catchingPromiseCreated, "f") && !listeners?.length) {
               Promise.reject(error);
@@ -11299,7 +11299,7 @@ var init_BetaMessageStream = __esm({
             this._emit("end");
             return;
           }
-          if (event === "error") {
+          if (event2 === "error") {
             const error = args[0];
             if (!__classPrivateFieldGet(this, _BetaMessageStream_catchingPromiseCreated, "f") && !listeners?.length) {
               Promise.reject(error);
@@ -11328,8 +11328,8 @@ var init_BetaMessageStream = __esm({
             __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_beginRequest).call(this);
             this._connected(null);
             const stream2 = Stream.fromReadableStream(readableStream, this.controller);
-            for await (const event of stream2) {
-              __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_addStreamEvent).call(this, event);
+            for await (const event2 of stream2) {
+              __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_addStreamEvent).call(this, event2);
             }
             if (stream2.controller.signal?.aborted) {
               throw new APIUserAbortError();
@@ -11359,24 +11359,24 @@ var init_BetaMessageStream = __esm({
           if (this.ended)
             return;
           __classPrivateFieldSet(this, _BetaMessageStream_currentMessageSnapshot, void 0, "f");
-        }, _BetaMessageStream_addStreamEvent = function _BetaMessageStream_addStreamEvent2(event) {
+        }, _BetaMessageStream_addStreamEvent = function _BetaMessageStream_addStreamEvent2(event2) {
           if (this.ended)
             return;
-          const messageSnapshot = __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_accumulateMessage).call(this, event);
-          this._emit("streamEvent", event, messageSnapshot);
-          switch (event.type) {
+          const messageSnapshot = __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_accumulateMessage).call(this, event2);
+          this._emit("streamEvent", event2, messageSnapshot);
+          switch (event2.type) {
             case "content_block_delta": {
               const content = messageSnapshot.content.at(-1);
-              switch (event.delta.type) {
+              switch (event2.delta.type) {
                 case "text_delta": {
                   if (content.type === "text") {
-                    this._emit("text", event.delta.text, content.text || "");
+                    this._emit("text", event2.delta.text, content.text || "");
                   }
                   break;
                 }
                 case "citations_delta": {
                   if (content.type === "text") {
-                    this._emit("citation", event.delta.citation, content.citations ?? []);
+                    this._emit("citation", event2.delta.citation, content.citations ?? []);
                   }
                   break;
                 }
@@ -11389,13 +11389,13 @@ var init_BetaMessageStream = __esm({
                       __classPrivateFieldGet(this, _BetaMessageStream_handleError, "f").call(this, __classPrivateFieldGet(this, _BetaMessageStream_instances, "m", _BetaMessageStream_toolInputParseError).call(this, content, err));
                       break;
                     }
-                    this._emit("inputJson", event.delta.partial_json, jsonSnapshot);
+                    this._emit("inputJson", event2.delta.partial_json, jsonSnapshot);
                   }
                   break;
                 }
                 case "thinking_delta": {
                   if (content.type === "thinking") {
-                    this._emit("thinking", event.delta.thinking, content.thinking);
+                    this._emit("thinking", event2.delta.thinking, content.thinking);
                   }
                   break;
                 }
@@ -11412,7 +11412,7 @@ var init_BetaMessageStream = __esm({
                   break;
                 }
                 default:
-                  checkNever(event.delta);
+                  checkNever(event2.delta);
               }
               break;
             }
@@ -11443,125 +11443,125 @@ var init_BetaMessageStream = __esm({
           }
           __classPrivateFieldSet(this, _BetaMessageStream_currentMessageSnapshot, void 0, "f");
           return maybeParseBetaMessage(snapshot, __classPrivateFieldGet(this, _BetaMessageStream_params, "f"), { logger: __classPrivateFieldGet(this, _BetaMessageStream_logger, "f") });
-        }, _BetaMessageStream_accumulateMessage = function _BetaMessageStream_accumulateMessage2(event) {
+        }, _BetaMessageStream_accumulateMessage = function _BetaMessageStream_accumulateMessage2(event2) {
           let snapshot = __classPrivateFieldGet(this, _BetaMessageStream_currentMessageSnapshot, "f");
-          if (event.type === "message_start") {
+          if (event2.type === "message_start") {
             if (snapshot) {
-              throw new AnthropicError(`Unexpected event order, got ${event.type} before receiving "message_stop"`);
+              throw new AnthropicError(`Unexpected event order, got ${event2.type} before receiving "message_stop"`);
             }
-            return event.message;
+            return event2.message;
           }
           if (!snapshot) {
-            throw new AnthropicError(`Unexpected event order, got ${event.type} before "message_start"`);
+            throw new AnthropicError(`Unexpected event order, got ${event2.type} before "message_start"`);
           }
-          switch (event.type) {
+          switch (event2.type) {
             case "message_stop":
               return snapshot;
             case "message_delta":
-              snapshot.stop_reason = event.delta.stop_reason;
-              snapshot.stop_sequence = event.delta.stop_sequence;
-              snapshot.stop_details = event.delta.stop_details;
-              snapshot.usage.output_tokens = event.usage.output_tokens;
-              if (event.delta.container != null) {
-                snapshot.container = event.delta.container;
+              snapshot.stop_reason = event2.delta.stop_reason;
+              snapshot.stop_sequence = event2.delta.stop_sequence;
+              snapshot.stop_details = event2.delta.stop_details;
+              snapshot.usage.output_tokens = event2.usage.output_tokens;
+              if (event2.delta.container != null) {
+                snapshot.container = event2.delta.container;
               }
-              if (event.context_management != null) {
-                snapshot.context_management = event.context_management;
+              if (event2.context_management != null) {
+                snapshot.context_management = event2.context_management;
               }
-              if (event.input_transformations != null) {
-                snapshot.input_transformations = event.input_transformations;
+              if (event2.input_transformations != null) {
+                snapshot.input_transformations = event2.input_transformations;
               }
-              if (event.usage.input_tokens != null) {
-                snapshot.usage.input_tokens = event.usage.input_tokens;
+              if (event2.usage.input_tokens != null) {
+                snapshot.usage.input_tokens = event2.usage.input_tokens;
               }
-              if (event.usage.cache_creation_input_tokens != null) {
-                snapshot.usage.cache_creation_input_tokens = event.usage.cache_creation_input_tokens;
+              if (event2.usage.cache_creation_input_tokens != null) {
+                snapshot.usage.cache_creation_input_tokens = event2.usage.cache_creation_input_tokens;
               }
-              if (event.usage.cache_read_input_tokens != null) {
-                snapshot.usage.cache_read_input_tokens = event.usage.cache_read_input_tokens;
+              if (event2.usage.cache_read_input_tokens != null) {
+                snapshot.usage.cache_read_input_tokens = event2.usage.cache_read_input_tokens;
               }
-              if (event.usage.server_tool_use != null) {
-                snapshot.usage.server_tool_use = event.usage.server_tool_use;
+              if (event2.usage.server_tool_use != null) {
+                snapshot.usage.server_tool_use = event2.usage.server_tool_use;
               }
-              if (event.usage.iterations != null) {
-                snapshot.usage.iterations = event.usage.iterations;
+              if (event2.usage.iterations != null) {
+                snapshot.usage.iterations = event2.usage.iterations;
               }
-              if (event.usage.fallback_credit != null) {
-                snapshot.usage.fallback_credit = event.usage.fallback_credit;
+              if (event2.usage.fallback_credit != null) {
+                snapshot.usage.fallback_credit = event2.usage.fallback_credit;
               }
-              if (event.usage.output_tokens_details != null) {
-                snapshot.usage.output_tokens_details = event.usage.output_tokens_details;
+              if (event2.usage.output_tokens_details != null) {
+                snapshot.usage.output_tokens_details = event2.usage.output_tokens_details;
               }
               return snapshot;
             case "content_block_start":
-              snapshot.content.push(event.content_block);
-              if (event.content_block.type === "fallback") {
-                snapshot.model = event.content_block.to.model;
+              snapshot.content.push(event2.content_block);
+              if (event2.content_block.type === "fallback") {
+                snapshot.model = event2.content_block.to.model;
               }
               return snapshot;
             case "content_block_delta": {
-              const snapshotContent = snapshot.content.at(event.index);
-              switch (event.delta.type) {
+              const snapshotContent = snapshot.content.at(event2.index);
+              switch (event2.delta.type) {
                 case "text_delta": {
                   if (snapshotContent?.type === "text") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      text: (snapshotContent.text || "") + event.delta.text
+                      text: (snapshotContent.text || "") + event2.delta.text
                     };
                   }
                   break;
                 }
                 case "citations_delta": {
                   if (snapshotContent?.type === "text") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      citations: [...snapshotContent.citations ?? [], event.delta.citation]
+                      citations: [...snapshotContent.citations ?? [], event2.delta.citation]
                     };
                   }
                   break;
                 }
                 case "input_json_delta": {
                   if (snapshotContent && tracksToolInput2(snapshotContent)) {
-                    const jsonBuf = (snapshotContent[JSON_BUF_PROPERTY] || "") + event.delta.partial_json;
-                    snapshot.content[event.index] = withLazyInput(snapshotContent, jsonBuf);
+                    const jsonBuf = (snapshotContent[JSON_BUF_PROPERTY] || "") + event2.delta.partial_json;
+                    snapshot.content[event2.index] = withLazyInput(snapshotContent, jsonBuf);
                   }
                   break;
                 }
                 case "thinking_delta": {
                   if (snapshotContent?.type === "thinking") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      thinking: snapshotContent.thinking + event.delta.thinking
+                      thinking: snapshotContent.thinking + event2.delta.thinking
                     };
                   }
                   break;
                 }
                 case "signature_delta": {
                   if (snapshotContent?.type === "thinking") {
-                    snapshot.content[event.index] = {
+                    snapshot.content[event2.index] = {
                       ...snapshotContent,
-                      signature: event.delta.signature
+                      signature: event2.delta.signature
                     };
                   }
                   break;
                 }
                 case "compaction_delta": {
                   if (snapshotContent?.type === "compaction") {
-                    const block = { ...snapshotContent, content: event.delta.content };
-                    if ("encrypted_content" in event.delta) {
-                      block.encrypted_content = event.delta.encrypted_content;
+                    const block = { ...snapshotContent, content: event2.delta.content };
+                    if ("encrypted_content" in event2.delta) {
+                      block.encrypted_content = event2.delta.encrypted_content;
                     }
-                    snapshot.content[event.index] = block;
+                    snapshot.content[event2.index] = block;
                   }
                   break;
                 }
                 default:
-                  checkNever(event.delta);
+                  checkNever(event2.delta);
               }
               return snapshot;
             }
             case "content_block_stop": {
-              const snapshotContent = snapshot.content.at(event.index);
+              const snapshotContent = snapshot.content.at(event2.index);
               if (snapshotContent && tracksToolInput2(snapshotContent) && JSON_BUF_PROPERTY in snapshotContent) {
                 let input2;
                 try {
@@ -11587,12 +11587,12 @@ var init_BetaMessageStream = __esm({
           const pushQueue = [];
           const readQueue = [];
           let done = false;
-          this.on("streamEvent", (event) => {
+          this.on("streamEvent", (event2) => {
             const reader = readQueue.shift();
             if (reader) {
-              reader.resolve(event);
+              reader.resolve(event2);
             } else {
-              pushQueue.push(event);
+              pushQueue.push(event2);
             }
           });
           this.on("end", () => {
@@ -17015,10 +17015,10 @@ var init_BetaToolRunnerStream = __esm({
           stream2._run(() => stream2._createMessage(messages, { ...params, stream: true }, { ...options, headers: { ...options?.headers, [STAINLESS_HELPER_METHOD_HEADER]: "stream" } }));
           return stream2;
         }
-        _emit(event, ...args) {
+        _emit(event2, ...args) {
           var _a2;
-          if (event !== "streamEvent" || this.ended) {
-            super._emit(event, ...args);
+          if (event2 !== "streamEvent" || this.ended) {
+            super._emit(event2, ...args);
             return;
           }
           __classPrivateFieldSet(this, _BetaToolRunnerStream_emitted, (_a2 = __classPrivateFieldGet(this, _BetaToolRunnerStream_emitted, "f"), _a2++, _a2), "f");
@@ -17028,7 +17028,7 @@ var init_BetaToolRunnerStream = __esm({
           if (closed) {
             __classPrivateFieldGet(this, _BetaToolRunnerStream_toolCalls, "f").push(closed);
           }
-          super._emit(event, ...args);
+          super._emit(event2, ...args);
           __classPrivateFieldGet(this, _BetaToolRunnerStream_instances, "m", _BetaToolRunnerStream_track).call(this, streamEvent, closed);
           __classPrivateFieldGet(this, _BetaToolRunnerStream_instances, "m", _BetaToolRunnerStream_release).call(this);
         }
@@ -17064,16 +17064,16 @@ var init_BetaToolRunnerStream = __esm({
           };
         }
       }
-      _BetaToolRunnerStream_track = function _BetaToolRunnerStream_track2(event, closed) {
+      _BetaToolRunnerStream_track = function _BetaToolRunnerStream_track2(event2, closed) {
         if (__classPrivateFieldGet(this, _BetaToolRunnerStream_fallback, "f")) {
           return;
         }
-        if (event.type === "content_block_start" && event.content_block.type === "fallback") {
+        if (event2.type === "content_block_start" && event2.content_block.type === "fallback") {
           __classPrivateFieldSet(this, _BetaToolRunnerStream_fallback, true, "f");
           __classPrivateFieldSet(this, _BetaToolRunnerStream_closed, void 0, "f");
           return;
         }
-        const movedOn = event.type === "content_block_start" || event.type === "message_delta" && event.delta.stop_reason === "tool_use";
+        const movedOn = event2.type === "content_block_start" || event2.type === "message_delta" && event2.delta.stop_reason === "tool_use";
         if (__classPrivateFieldGet(this, _BetaToolRunnerStream_closed, "f") && movedOn) {
           __classPrivateFieldGet(this, _BetaToolRunnerStream_ready, "f").push({ toolUse: __classPrivateFieldGet(this, _BetaToolRunnerStream_closed, "f"), event: __classPrivateFieldGet(this, _BetaToolRunnerStream_emitted, "f") });
           __classPrivateFieldSet(this, _BetaToolRunnerStream_closed, void 0, "f");
@@ -21217,7 +21217,7 @@ async function run() {
   }));
   const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
   const gh = new GitHub(input("github-token"), owner, repo);
-  const prNumber = Number(input("pr") || eventPr());
+  const prNumber = Number(input("pr") || event.pull_request?.number || "");
   if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
   const pr = await gh.json(`/repos/${owner}/${repo}/pulls/${prNumber}`);
   const cfg = {
@@ -21242,6 +21242,12 @@ async function run() {
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
     log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
     return { status: "done", verdict: prior.verdict ?? parseVerdict(comment?.body ?? ""), overridden };
+  }
+  const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
+  const resumable = prior?.status === "pending" && prior.sha === pr.head.sha;
+  if (labelEvent && (overridden || !resumable)) {
+    log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
+    return { status: prior?.sha === pr.head.sha && prior.status === "failed" ? "failed" : "pending", overridden };
   }
   if (prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
@@ -21382,8 +21388,8 @@ ${footer(msg, job, batch, slots.length, await context())}`
   }
 }
 function parseVerdict(text) {
-  const m = /\*\*Verdict:\*\*\s*(✅|⚠️|❌)/u.exec(text);
-  return m ? { "\u2705": "pass", "\u26A0\uFE0F": "minor", "\u274C": "changes" }[m[1]] : "unknown";
+  const m = /\*\*Verdict:\*\*\s*(✅|⚠\uFE0F?|❌)/u.exec(text);
+  return !m ? "unknown" : m[1] === "\u2705" ? "pass" : m[1] === "\u274C" ? "changes" : "minor";
 }
 function num(name, fallback) {
   const raw = input(name, String(fallback));
@@ -21433,14 +21439,19 @@ function parseState(body) {
     return null;
   }
 }
-function eventPr() {
+function readEvent() {
   const path4 = process.env.GITHUB_EVENT_PATH;
-  if (!path4) return "";
-  const event = JSON.parse(readFileSync(path4, "utf8"));
-  return String(event.pull_request?.number ?? "");
+  if (!path4) return {};
+  try {
+    return JSON.parse(readFileSync(path4, "utf8"));
+  } catch {
+    return {};
+  }
 }
 var mode = input("mode", "advisory");
 var overrideLabel = input("override-label", "review-override");
+var event = readEvent();
+var eventOverride = (event.pull_request?.labels ?? []).some((l) => l.name === overrideLabel);
 function blocker({ status, verdict }) {
   if (mode === "advisory") return null;
   if (status !== "done") return `No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`;
@@ -21464,7 +21475,12 @@ if (!["advisory", "complete", "pass"].includes(mode)) {
     }
   }).catch((e) => {
     setOutput("status", "failed");
-    log.error(e instanceof Error ? e.stack ?? e.message : String(e));
-    process.exitCode = 1;
+    const msg = e instanceof Error ? e.stack ?? e.message : String(e);
+    if (mode !== "advisory" && eventOverride) log.notice(`${msg}
+The \`${overrideLabel}\` label overrides the failure.`);
+    else {
+      log.error(msg);
+      process.exitCode = 1;
+    }
   });
 }

@@ -78,7 +78,13 @@ after creating a new personal repo.
    is not accepted by the Batches API.
 
 The model sees the PR as untrusted data and has no tools: it cannot run code, open other files or reach
-the network, so prompt injection in a diff can at worst skew the review text.
+the network. Prompt injection in a diff can still skew the review, and in `pass` mode that includes the
+verdict, so the gate is no defence against a hostile contributor: their PRs need a human review.
+
+Two cases pass the gate without a review: PRs opened by bots (the example workflow skips them, and a skipped
+required check counts as passed) and, with the override label, fork PRs, which get no secrets. A label
+change never submits a new batch: it reuses the head commit's review, waits for a pending one, or, with the
+override label, passes at once.
 
 ## Cost and timing
 
