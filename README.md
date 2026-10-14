@@ -57,7 +57,7 @@ It tags the next version on `origin/main`, creates the GitHub release and runs
 `scripts/pin-callers.sh <tag>`, which rewrites the pin in every non-archived repo of the personal account and
 the WhistleSafe org that has `.github/workflows/claude-review.yml`, and in `examples/claude-review.yml`. Each
 bump is one commit on the repo's default branch with `[skip ci]`: no review, no deploy. The rulesets'
-admin bypass lets it through. A new repo picks up the pin from the example; `pin-callers.sh <tag>` alone
+admin bypass lets it through; a repo whose ruleset has no bypass (hearth) gets the bump as a PR instead. A new repo picks up the pin from the example; `pin-callers.sh <tag>` alone
 re-pins everything to an existing release.
 
 ## Keys
