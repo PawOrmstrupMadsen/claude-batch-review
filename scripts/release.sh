@@ -6,7 +6,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bump=${1:-patch}
+[[ $bump =~ ^(patch|minor|major)$ ]] || { echo "bump must be patch, minor or major" >&2; exit 1; }
 git fetch -q --tags origin main
+# origin/main already released (say a run that failed while pinning): finish that release.
+if done_tag=$(git describe --tags --exact-match --match 'v[0-9]*' origin/main 2>/dev/null); then
+  gh release view "$done_tag" >/dev/null 2>&1 || gh release create "$done_tag" --verify-tag --generate-notes --title "$done_tag" >/dev/null
+  echo "origin/main is $done_tag; pinning callers"
+  exec scripts/pin-callers.sh "$done_tag"
+fi
 last=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
 if [[ -z $last ]]; then next=v1.0.0
 else
@@ -15,7 +22,6 @@ else
     major) next="v$((ma + 1)).0.0" ;;
     minor) next="v$ma.$((mi + 1)).0" ;;
     patch) next="v$ma.$mi.$((pa + 1))" ;;
-    *) echo "bump must be patch, minor or major" >&2; exit 1 ;;
   esac
   if [[ -z $(git log --oneline "$last..origin/main" -- . ':!examples/claude-review.yml') ]]; then
     echo "nothing to release since $last"; exit 0

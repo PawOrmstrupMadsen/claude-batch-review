@@ -20,7 +20,9 @@ pin() { # repo path branch
     grep -q "HTTP 404" <<<"$meta" && return 0   # not a caller
     echo "$repo: could not read $path: $meta" >&2; failed+=("$repo"); return 0
   fi
-  old=$(gh api "repos/$repo/contents/$path?ref=$branch" -H 'Accept: application/vnd.github.raw')
+  if ! old=$(gh api "repos/$repo/contents/$path?ref=$branch" -H 'Accept: application/vnd.github.raw' 2>&1); then
+    echo "$repo: could not read $path: $old" >&2; failed+=("$repo"); return 0
+  fi
   new=$(SHA=$sha TAG=$tag python3 -c '
 import os, re, sys
 s = sys.stdin.read()
@@ -42,8 +44,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" \
 
 pin "$self" examples/claude-review.yml main
 for owner in "${owners[@]}"; do
-  while read -r repo branch; do pin "$repo" .github/workflows/claude-review.yml "$branch"; done < <(
-    gh repo list "$owner" --limit 300 --no-archived --source --json nameWithOwner,defaultBranchRef \
-      -q '.[] | "\(.nameWithOwner) \(.defaultBranchRef.name)"')
+  # Listed first so a failing listing stops the script instead of looking like "no repos".
+  repos=$(gh repo list "$owner" --limit 300 --no-archived --source --json nameWithOwner,defaultBranchRef \
+    -q '.[] | "\(.nameWithOwner) \(.defaultBranchRef.name)"')
+  while read -r repo branch; do [[ -n $repo ]] && pin "$repo" .github/workflows/claude-review.yml "$branch"; done <<<"$repos"
 done
 if (( ${#failed[@]} )); then echo "not pinned: ${failed[*]}" >&2; exit 1; fi
