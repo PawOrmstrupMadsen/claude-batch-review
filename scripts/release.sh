@@ -26,7 +26,7 @@ else
   esac
   # Callers run only action.yml and dist/ (CI keeps dist/ in step with src/ and the dependencies),
   # so docs, scripts, tests and workflows alone are no reason to re-pin every repo. FORCE=1 releases anyway.
-  if [[ -z ${FORCE:-} && -z $(git log --oneline "$last..origin/main" -- action.yml dist/) ]]; then
+  if [[ ${FORCE:-} != 1 && -z $(git log --oneline "$last..origin/main" -- action.yml dist/) ]]; then
     echo "nothing to release since $last: action.yml and dist/ are unchanged (FORCE=1 to release anyway)"; exit 0
   fi
 fi
