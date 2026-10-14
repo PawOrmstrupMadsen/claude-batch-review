@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 60
     steps:
       # A release pin (@<sha> # vX.Y.Z); scripts/release.sh in claude-batch-review moves every caller.
-      - uses: PawOrmstrupMadsen/claude-batch-review@main
+      - uses: PawOrmstrupMadsen/claude-batch-review@9505deb6dd476b887959740f35b7359ad5b91f87 # v1.0.0
         with:
           api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
           pr: ${{ github.event.pull_request.number || inputs.pr }}
