@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/index.js --banner:js=\"import { createRequire } from \\\"node:module\\\"; const require = createRequire(import.meta.url);\"",
-    "check": "tsc"
+    "check": "tsc",
+    "test": "rm -rf .test-build && esbuild tests/*.test.ts --bundle --platform=node --target=node22 --format=esm --outdir=.test-build --packages=external --log-level=warning && node --test .test-build/*.test.js"
   },
   "repository": {
     "type": "git",

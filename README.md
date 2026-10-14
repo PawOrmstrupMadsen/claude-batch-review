@@ -103,6 +103,7 @@ jobs run on `ubuntu-latest` for free.
 ```bash
 npm ci
 npm run check   # tsc
+npm test        # node:test against an in-memory GitHub + Batches API (tests/fake.ts)
 npm run build   # bundles src/ into dist/index.js, which is committed
 ```
 
