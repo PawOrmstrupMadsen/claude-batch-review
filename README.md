@@ -44,6 +44,22 @@ Inputs (`with:`): `api-keys` (required), `model` (default `claude-opus-5-5`), `e
 
 Repo-specific review rules go in `.github/claude-review.md` (or the file named by `prompt-file`).
 
+## Releases and pinning
+
+Callers pin a release by commit SHA: `uses: PawOrmstrupMadsen/claude-batch-review@<sha> # vX.Y.Z`. A merge to
+`main` reaches nobody until it is released:
+
+```bash
+scripts/release.sh            # patch; or minor / major
+```
+
+It tags the next version on `origin/main`, creates the GitHub release and runs
+`scripts/pin-callers.sh <tag>`, which rewrites the pin in every non-archived repo of the personal account and
+the WhistleSafe org that has `.github/workflows/claude-review.yml`, and in `examples/claude-review.yml`. Each
+bump is one commit on the repo's default branch with `[skip ci]`: no review, no deploy. The rulesets'
+admin bypass lets it through. A new repo picks up the pin from the example; `pin-callers.sh <tag>` alone
+re-pins everything to an existing release.
+
 ## Keys
 
 `ANTHROPIC_REVIEW_KEYS` holds one Anthropic API key per line; `#` lines are ignored. The action tries them
