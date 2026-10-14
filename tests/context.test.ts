@@ -61,8 +61,11 @@ describe("buildContext", () => {
 
   it("lists a full file whose fetch failed", async () => {
     const w = new World();
-    w.files.push({ filename: "gone.ts", status: "modified", additions: 1, deletions: 0, patch: "+g" });
+    w.files.push({ filename: "flaky.ts", status: "modified", additions: 1, deletions: 0, patch: "+g" });
+    w.trees.head1["flaky.ts"] = "g\n";
+    w.failingPaths.add("flaky.ts");
     const c = await build(w);
-    assert.ok(c.omitted.includes("full text of `gone.ts` (fetch failed)") || c.omitted.includes("full text of `gone.ts`"));
+    assert.ok(c.omitted.includes("full text of `flaky.ts` (fetch failed)"), c.omitted.join("; "));
+    assert.match(c.text, /<file path="src\/a\.ts"/);
   });
 });

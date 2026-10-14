@@ -37,6 +37,8 @@ export class World {
     head1: { "CLAUDE.md": "House rules.", "src/a.ts": "y\n" },
   };
   comments: { id: number; body: string; user: { login: string } }[] = [];
+  /** Paths whose contents request answers 500. */
+  failingPaths = new Set<string>();
   batches: FakeBatch[] = [];
   /** Per API key: how batch creation answers. */
   keys: Record<string, "ok" | "billing" | "auth"> = {};
@@ -106,6 +108,7 @@ export class World {
       return json({ truncated: false, tree: Object.entries(files).map(([path, c]) => ({ path, type: "blob", size: c.length })) });
     }
     m = /^\/contents\/(.+)$/.exec(p);
+    if (method === "GET" && m && this.failingPaths.has(decodeURIComponent(m[1]))) return new Response("boom", { status: 500 });
     if (method === "GET" && m) {
       const content = this.trees[url.searchParams.get("ref") ?? ""]?.[decodeURIComponent(m[1])];
       return content === undefined ? new Response("Not Found", { status: 404 }) : new Response(content, { status: 200 });
