@@ -25,18 +25,22 @@ function escape(m: string): string {
 
 export class GitHub {
   private readonly api: string;
+  private readonly fetchImpl: typeof fetch;
 
   constructor(
     private readonly token: string,
     readonly owner: string,
     readonly repo: string,
+    fetchImpl: typeof fetch = fetch,
   ) {
+    // Wrapped so the native fetch is never called with this object as `this`.
+    this.fetchImpl = (input, init) => fetchImpl(input, init);
     this.api = process.env.GITHUB_API_URL || "https://api.github.com";
   }
 
   async request(path: string, init: RequestInit & { accept?: string } = {}): Promise<Response> {
     const url = path.startsWith("http") ? path : `${this.api}${path}`;
-    const res = await fetch(url, {
+    const res = await this.fetchImpl(url, {
       ...init,
       headers: {
         authorization: `Bearer ${this.token}`,
