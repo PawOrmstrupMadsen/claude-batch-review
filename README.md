@@ -53,7 +53,9 @@ Callers pin a release by commit SHA: `uses: PawOrmstrupMadsen/claude-batch-revie
 scripts/release.sh            # patch; or minor / major
 ```
 
-It tags the next version on `origin/main`, creates the GitHub release and runs
+It releases only when `action.yml` or `dist/` changed since the last tag (what callers actually run; CI keeps
+`dist/` in step with `src/`), so docs, scripts and tests alone release nothing; `FORCE=1` overrides that. It
+tags the next version on `origin/main`, creates the GitHub release and runs
 `scripts/pin-callers.sh <tag>`, which rewrites the pin in every non-archived repo of the personal account and
 the WhistleSafe org that has `.github/workflows/claude-review.yml`, and in `examples/claude-review.yml`. Each
 bump is one commit on the repo's default branch with `[skip ci]`: no review, no deploy. The rulesets'

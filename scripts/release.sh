@@ -3,6 +3,7 @@
 # every caller to it (pin-callers.sh). Callers only ever run a release, so a merge to main changes
 # nothing until this runs.
 # Usage: scripts/release.sh [patch|minor|major]   (default patch; the first release is v1.0.0)
+# Releases only when action.yml or dist/ changed since the last tag, unless FORCE=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bump=${1:-patch}
@@ -23,8 +24,10 @@ else
     minor) next="v$ma.$((mi + 1)).0" ;;
     patch) next="v$ma.$mi.$((pa + 1))" ;;
   esac
-  if [[ -z $(git log --oneline "$last..origin/main" -- . ':!examples/claude-review.yml') ]]; then
-    echo "nothing to release since $last"; exit 0
+  # Callers run only action.yml and dist/ (CI keeps dist/ in step with src/ and the dependencies),
+  # so docs, scripts, tests and workflows alone are no reason to re-pin every repo. FORCE=1 releases anyway.
+  if [[ ${FORCE:-} != 1 && -z $(git log --oneline "$last..origin/main" -- action.yml dist/) ]]; then
+    echo "nothing to release since $last: action.yml and dist/ are unchanged (FORCE=1 to release anyway)"; exit 0
   fi
 fi
 git tag -a "$next" -m "$next" origin/main

@@ -4,8 +4,8 @@ Public JavaScript action (node24): PR review through the Anthropic Message Batch
 `README.md` is the manual.
 
 - Callers pin a release (`@<sha> # vX.Y.Z`), so a merge changes nothing until `scripts/release.sh`
-  tags it and pins every caller (direct `[skip ci]` commits). Release after merging a change that
-  should reach the repos. This repo reviews its own PRs with `uses: ./`, which is the test for a change.
+  tags it and pins every caller (direct `[skip ci]` commits). Release after merging a change to
+  `action.yml` or `src/` (dist/); the script skips releases where neither changed. This repo reviews its own PRs with `uses: ./`, which is the test for a change.
 - `dist/index.js` is committed: run `npm run check && npm run build` and commit `dist/` with the source.
 - Public repo: no keys, hostnames, LAN details or private repo names in it. Keys live only in the
   `ANTHROPIC_REVIEW_KEYS` secrets and `~/.config/claude-review/keys` on the desktop.
