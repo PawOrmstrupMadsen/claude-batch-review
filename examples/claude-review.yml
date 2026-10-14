@@ -36,7 +36,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, <repo-label>]
     timeout-minutes: 60
     steps:
-      # @main on purpose: one central version for every repo.
+      # A release pin (@<sha> # vX.Y.Z); scripts/release.sh in claude-batch-review moves every caller.
       - uses: PawOrmstrupMadsen/claude-batch-review@main
         with:
           api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
