@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { buildContext, type Pull, type ReviewContext } from "./context.js";
 import { GitHub, input, log, setOutput } from "./github.js";
+import { chatReview, httpPost, type ChatAnswer, type Post } from "./openai.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
 
 const MARKER = "<!-- claude-batch-review";
@@ -28,16 +29,20 @@ interface Slot {
 export type Verdict = "pass" | "minor" | "changes" | "unknown";
 export type Status = "done" | "pending" | "failed" | "skipped";
 export type Mode = "advisory" | "complete" | "pass";
+export type Backend = "anthropic" | "openai";
 
 /** Seams for tests: the network and the clock. */
 export interface Deps {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** The `openai` backend's HTTP POST. */
+  post?: Post;
 }
 
 interface Settings {
   mode: Mode;
   overrideLabel: string;
+  backend: Backend;
   event: PrEvent;
 }
 
@@ -70,7 +75,7 @@ export interface Outcome {
   overridden?: boolean;
 }
 
-async function run({ overrideLabel, event }: Settings, deps: Deps): Promise<Outcome> {
+async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Promise<Outcome> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const keys = input("api-keys")
     .split(/\r?\n/)
@@ -89,18 +94,23 @@ async function run({ overrideLabel, event }: Settings, deps: Deps): Promise<Outc
   if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
   const pr = await gh.json<Pull>(`/repos/${owner}/${repo}/pulls/${prNumber}`);
 
+  const openai = backend === "openai";
   const cfg = {
-    model: input("model", "claude-opus-5-5"),
+    model: openai ? input("openai-model") : input("model", "claude-opus-5-5"),
     fallbackModel: input("fallback-model", "claude-opus-4-8"),
     effort: input("effort", "high") as "low" | "medium" | "high" | "xhigh" | "max",
     maxOutputTokens: num("max-output-tokens", 32000),
     maxInputTokens: num("max-input-tokens", 300000),
-    maxWaitMs: num("max-wait-minutes", 20) * 60_000,
+    maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 60_000,
     promptFile: input("prompt-file"),
     force: input("force") === "true",
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
-  if (keys.length === 0) {
+  const openaiKey = input("openai-api-key");
+  if (openaiKey) log.mask(openaiKey);
+  const baseUrl = input("openai-base-url");
+  if (openai && (!baseUrl || !cfg.model)) throw new Error("backend openai needs the `openai-base-url` and `openai-model` inputs.");
+  if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
     return { status: "skipped", overridden };
   }
@@ -117,12 +127,13 @@ async function run({ overrideLabel, event }: Settings, deps: Deps): Promise<Outc
   }
   // A label change only re-evaluates the gate: it may resume a pending batch, never pay for a new one.
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
-  const resumable = prior?.status === "pending" && prior.sha === pr.head.sha;
+  // Only a batch can be resumed; the openai backend has none.
+  const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
   if (labelEvent && (overridden || !resumable)) {
     log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
     return { status: prior?.sha === pr.head.sha && prior.status === "failed" ? "failed" : "pending", overridden };
   }
-  if (prior?.status === "pending" && prior.batch) {
+  if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
     if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
       job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted: prior.submitted ?? "" };
@@ -179,7 +190,8 @@ async function run({ overrideLabel, event }: Settings, deps: Deps): Promise<Outc
       comment = await gh.json<Comment>(`${base}/${prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: full }) });
     }
   };
-  const header = (model: string) => `## Claude review · \`${model}\` · ${sha7}\n\n`;
+  // The openai backend's heading names only the model, so its review never passes for Claude's.
+  const header = (model: string) => `## ${openai ? "Review" : "Claude review"} · \`${model}\` · ${sha7}\n\n`;
 
   const queue = async (j: Job) =>
     upsert(
@@ -193,7 +205,36 @@ async function run({ overrideLabel, event }: Settings, deps: Deps): Promise<Outc
     return { status: "failed", overridden };
   };
 
+  const reviewOpenAI = async (): Promise<Outcome> => {
+    const c = await context();
+    await upsert(
+      { status: "pending", sha: pr.head.sha, model: cfg.model },
+      `${header(cfg.model)}⏳ Reviewing with \`${cfg.model}\`. This comment becomes the review when the model answers.`,
+    );
+    log.info(`Asking ${cfg.model} at ${baseUrl} (waits up to ${cfg.maxWaitMs / 60_000} min).`);
+    const r = await chatReview(deps.post ?? httpPost, sleep, {
+      baseUrl,
+      apiKey: openaiKey,
+      model: cfg.model,
+      maxTokens: cfg.maxOutputTokens,
+      timeoutMs: cfg.maxWaitMs,
+      system: `${SYSTEM_PROMPT}\n\n${c.guidance || "(The repository has no guidance files.)"}`,
+      user: c.text,
+    });
+    if (!r.ok) return fail(cfg.model, r.why);
+    const a = r.answer;
+    const truncated = a.truncated ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
+    const verdict = parseVerdict(a.text);
+    await upsert(
+      { status: "done", verdict, sha: pr.head.sha, model: a.model },
+      `${header(a.model)}${a.text || "_Empty response._"}${truncated}\n\n${openaiFooter(a, c)}`,
+    );
+    log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    return { status: "done", verdict, overridden };
+  };
+
   const review = async (): Promise<Outcome> => {
+    if (openai) return reviewOpenAI();
     if (!job) {
       job = await submit(0, cfg.model);
       if (!job) return fail(cfg.model, `none of the ${slots.length} API keys has credit left. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
@@ -311,16 +352,29 @@ function footer(
   const price = PRICES[msg.model];
   const cost = price ? ` · ≈ $${((input * price[0] + u.output_tokens * price[1]) / 2 / 1e6).toFixed(3)}` : "";
   const waited = batch.ended_at ? Math.round((Date.parse(batch.ended_at) - Date.parse(batch.created_at)) / 1000) : 0;
-  const shown = ctx.omitted.slice(0, 50).map((o) => `- ${o}`);
-  if (ctx.omitted.length > 50) shown.push(`- … and ${ctx.omitted.length - 50} more`);
-  const omitted = shown.length
-    ? `\n<details><summary>Not shown to the reviewer</summary>\n\n${shown.join("\n")}\n</details>`
-    : "";
   return (
     `---\n<sub>Message Batches API · ${ctx.files} files · ${input.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost}` +
-    ` · batch took ${Math.floor(waited / 60)}m${waited % 60}s · key ${job.slot + 1}/${keyCount} · ` +
-    `[claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)</sub>${omitted}`
+    ` · batch took ${duration(waited)} · key ${job.slot + 1}/${keyCount} · ${LINK}</sub>${omittedList(ctx)}`
   );
+}
+
+function openaiFooter(a: ChatAnswer, ctx: ReviewContext): string {
+  return (
+    `---\n<sub>OpenAI-compatible API · ${ctx.files} files · ${a.inputTokens.toLocaleString("en")} in / ${a.outputTokens.toLocaleString("en")} out tokens` +
+    ` · took ${duration(Math.round(a.ms / 1000))} · ${LINK}</sub>${omittedList(ctx)}`
+  );
+}
+
+const LINK = "[claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)";
+
+function duration(s: number): string {
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+function omittedList(ctx: ReviewContext): string {
+  const shown = ctx.omitted.slice(0, 50).map((o) => `- ${o}`);
+  if (ctx.omitted.length > 50) shown.push(`- … and ${ctx.omitted.length - 50} more`);
+  return shown.length ? `\n<details><summary>Not shown to the reviewer</summary>\n\n${shown.join("\n")}\n</details>` : "";
 }
 
 /** Only the action's own comment counts, so nobody else can plant a state marker. */
@@ -366,13 +420,18 @@ export function blocker(mode: Mode, { status, verdict }: Outcome): string | null
 export async function main(deps: Deps = {}): Promise<number> {
   const mode = input("mode", "advisory") as Mode;
   const overrideLabel = input("override-label", "review-override");
+  const backend = input("backend", "anthropic") as Backend;
   const event = readEvent();
   if (!["advisory", "complete", "pass"].includes(mode)) {
     log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
     return 1;
   }
+  if (!["anthropic", "openai"].includes(backend)) {
+    log.error(`Input backend must be anthropic or openai, got "${backend}".`);
+    return 1;
+  }
   try {
-    const outcome = await run({ mode, overrideLabel, event }, deps);
+    const outcome = await run({ mode, overrideLabel, backend, event }, deps);
     setOutput("status", outcome.status);
     setOutput("verdict", outcome.verdict ?? "");
     const why = blocker(mode, outcome);

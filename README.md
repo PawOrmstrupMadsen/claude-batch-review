@@ -36,13 +36,41 @@ To redo a commit that already has a review: Actions → Claude review → Run wo
 A PR opened before the workflow existed has no **Claude review** check, so a required check blocks it. Close and
 reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the workflow on the PR.
 
-Inputs (`with:`): `api-keys` (required), `model` (default `claude-opus-5-5`), `effort` (`high`),
+Inputs (`with:`): `backend` (`anthropic`), `api-keys` (backend `anthropic`), `openai-base-url`, `openai-model`,
+`openai-api-key` (backend `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
-`max-wait-minutes` (`20`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
+`max-wait-minutes` (`20`; `30` for `openai`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
 `pr`, `github-token`, `comment-author`. Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
 `verdict` = `pass`, `minor`, `changes` or `unknown`. Full descriptions are in [`action.yml`](action.yml).
 
 Repo-specific review rules go in `.github/claude-review.md` (or the file named by `prompt-file`).
+
+## OpenAI-compatible backend
+
+`backend: openai` sends the same prompt to any OpenAI-compatible chat completions endpoint instead, for
+example a self-hosted model server, when the Anthropic keys are out of credit or a repo should not use them:
+
+```yaml
+      - uses: PawOrmstrupMadsen/claude-batch-review@<sha> # vX.Y.Z
+        with:
+          backend: openai
+          openai-base-url: http://<model-server>:8000/v1
+          openai-model: <model>
+          mode: pass
+```
+
+- It is one synchronous `POST <base>/chat/completions` (not streamed), waiting up to `max-wait-minutes`
+  (default 30) for a server that may be busy with other requests; a 502/503/504 or a refused connection is
+  retried twice, 30 s apart. There is no batch, so nothing to resume: a run that died while waiting asks again.
+- The guidance and the system prompt go in one system message, the PR in the user turn. Thinking that the
+  server returns inside the content (up to `</think>`) is dropped.
+- The comment reads `## Review · <model>`, naming the model the server reports, never "Claude review"; the
+  footer gives the token counts the server reports and how long the answer took.
+- Verdict, sticky comment, `mode` and the override label work as with Claude. A prompt larger than the model's
+  context fails the job with that error: lower `max-input-tokens` to the model's context minus
+  `max-output-tokens`.
+- No key is sent unless `openai-api-key` is set. With no secrets involved, fork PRs are reviewed too, so keep
+  such endpoints to private repos on self-hosted runners that can reach them.
 
 ## Releases and pinning
 

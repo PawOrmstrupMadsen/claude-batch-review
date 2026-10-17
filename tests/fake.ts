@@ -46,6 +46,17 @@ export class World {
   pollsToEnd = 1;
   /** The batch result for a request; defaults to a passing review. */
   result: (b: FakeBatch) => Json = () => succeeded(VERDICT_PASS);
+  /** Chat completion requests the `openai` backend sent. */
+  chats: { url: string; headers: Record<string, string>; body: Json; timeoutMs: number }[] = [];
+  /** How the chat endpoint answers, per request (0-based); defaults to a passing review. */
+  chat: (n: number) => { status: number; text: string } | Error = () => ({ status: 200, text: JSON.stringify(completion(VERDICT_PASS)) });
+
+  post = async (url: string, headers: Record<string, string>, body: string, timeoutMs: number) => {
+    this.chats.push({ url, headers, body: JSON.parse(body) as Json, timeoutMs });
+    const r = this.chat(this.chats.length - 1);
+    if (r instanceof Error) throw r;
+    return r;
+  };
 
   get comment() {
     return this.comments[0]?.body ?? "";
@@ -144,6 +155,17 @@ export function succeeded(text: string, extra: Json = {}): Json {
       usage: { input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       ...extra,
     },
+  };
+}
+
+export function completion(text: string, extra: Json = {}): Json {
+  return {
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    model: "local-model-q4",
+    choices: [{ index: 0, message: { role: "assistant", content: text, reasoning_content: "thinking" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1500, completion_tokens: 300, total_tokens: 1800 },
+    ...extra,
   };
 }
 

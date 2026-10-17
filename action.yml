@@ -1,13 +1,25 @@
 name: Claude batch review
-description: Reviews a pull request with Claude through the Message Batches API (half price), rotating across several API keys.
+description: Reviews a pull request with Claude through the Message Batches API (half price), rotating across several API keys, or with a model behind an OpenAI-compatible endpoint.
 author: Paw Ormstrup Madsen
 branding:
   icon: eye
   color: orange
 inputs:
+  backend:
+    description: "anthropic: Claude through the Message Batches API. openai: one synchronous request to an OpenAI-compatible chat completions endpoint (`openai-base-url`, `openai-model`); no batch, no keys needed."
+    default: anthropic
   api-keys:
-    description: Anthropic API keys, one per line, used in order; a key that is out of credit is skipped. Lines starting with '#' are ignored.
-    required: true
+    description: Anthropic API keys, one per line, used in order; a key that is out of credit is skipped. Lines starting with '#' are ignored. Backend anthropic only.
+    default: ''
+  openai-base-url:
+    description: "Backend openai: the API base URL, up to and including `/v1`; the action posts to `<base>/chat/completions`."
+    default: ''
+  openai-model:
+    description: "Backend openai: the model name sent in the request. The comment names the model the server reports."
+    default: ''
+  openai-api-key:
+    description: "Backend openai: sent as `Authorization: Bearer` when set; no header otherwise."
+    default: 
   github-token:
     description: Token that reads the PR and writes its comment.
     default: ${{ github.token }}
@@ -15,13 +27,13 @@ inputs:
     description: Pull request number. Defaults to the triggering pull_request event.
     default: ''
   model:
-    description: Model id.
+    description: Model id (backend anthropic).
     default: claude-opus-5-5
   fallback-model:
-    description: Model the request is resubmitted to when the main model declines it.
+    description: Model the request is resubmitted to when the main model declines it (backend anthropic).
     default: claude-opus-4-8
   effort:
-    description: low, medium, high, xhigh or max.
+    description: low, medium, high, xhigh or max (backend anthropic).
     default: high
   max-input-tokens:
     description: Approximate cap on the prompt; the largest diffs and full files are left out beyond it, and the comment lists what was left out.
@@ -30,8 +42,8 @@ inputs:
     description: max_tokens of the request (thinking included).
     default: '32000'
   max-wait-minutes:
-    description: How long the job waits for the batch. A later run for the same head commit resumes the pending batch.
-    default: '20'
+    description: "How long the job waits for the batch (default 20); a later run for the same head commit resumes the pending batch. Backend openai: how long it waits for the answer (default 30)."
+    default: ''
   prompt-file:
     description: Extra review instructions in the calling repo, read from the PR's base commit. `.github/claude-review.md` is always picked up when present.
     default: ''
