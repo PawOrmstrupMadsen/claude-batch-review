@@ -103,6 +103,7 @@ async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Pro
     maxInputTokens: num("max-input-tokens", 300000),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 60_000,
     promptFile: input("prompt-file"),
+    reasoningEffort: input("openai-reasoning-effort"),
     force: input("force") === "true",
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
@@ -219,22 +220,37 @@ async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Pro
       `${header(cfg.model)}⏳ Reviewing with \`${cfg.model}\`. This comment becomes the review when the model answers.`,
     );
     log.info(`Asking ${cfg.model} at ${baseUrl} (waits up to ${cfg.maxWaitMs / 60_000} min).`);
-    const r = await chatReview(deps.post ?? httpPost, sleep, {
-      baseUrl,
-      apiKey: openaiKey,
-      model: cfg.model,
-      maxTokens: cfg.maxOutputTokens,
-      timeoutMs: cfg.maxWaitMs,
-      system: `${SYSTEM_PROMPT}\n\n${c.guidance || "(The repository has no guidance files.)"}`,
-      user: c.text,
-    });
+    const deadline = Date.now() + cfg.maxWaitMs;
+    const ask = (reasoningEffort: string) =>
+      chatReview(deps.post ?? httpPost, sleep, {
+        baseUrl,
+        apiKey: openaiKey,
+        model: cfg.model,
+        maxTokens: cfg.maxOutputTokens,
+        reasoningEffort,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+        system: `${SYSTEM_PROMPT}\n\n${c.guidance || "(The repository has no guidance files.)"}`,
+        user: c.text,
+      });
+    let r = await ask(cfg.reasoningEffort);
     if (!r.ok) return fail(cfg.model, r.why);
-    const a = r.answer;
+    let a = r.answer;
+    let retried = "";
+    // A reasoning model can spend the whole output budget thinking: ask once more, thinking less.
+    if (thoughtOut(a) && deadline - Date.now() > MIN_RETRY_MS) {
+      const effort = RETRY_EFFORT;
+      const first = a;
+      log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
+      r = await ask(effort);
+      if (!r.ok) return fail(cfg.model, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})`);
+      a = { ...r.answer, ms: first.ms + r.answer.ms, inputTokens: first.inputTokens + r.answer.inputTokens, outputTokens: first.outputTokens + r.answer.outputTokens };
+      retried = ` · retried at reasoning effort ${effort} after ${first.text ? "an answer cut off before its verdict" : "an empty answer"}`;
+    }
     const truncated = a.truncated ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
     const verdict = parseVerdict(a.text);
     await upsert(
       { status: "done", verdict, sha: pr.head.sha, model: a.model },
-      `${header(a.model)}${a.text || "_Empty response._"}${truncated}\n\n${openaiFooter(a, c)}`,
+      `${header(a.model)}${a.text || "_Empty response._"}${truncated}\n\n${openaiFooter(a, c, retried)}`,
     );
     log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
     return { status: "done", verdict, overridden };
@@ -365,10 +381,20 @@ function footer(
   );
 }
 
-function openaiFooter(a: ChatAnswer, ctx: ReviewContext): string {
+/** The answer is empty, or ran out of output tokens before its verdict line. */
+function thoughtOut(a: ChatAnswer): boolean {
+  return !a.text || (a.truncated && parseVerdict(a.text) === "unknown");
+}
+
+/** The effort a retry uses, whatever the first request asked for: `low` again when that was it. */
+const RETRY_EFFORT = "low";
+/** A retry needs at least this much of `max-wait-minutes` left. */
+const MIN_RETRY_MS = 60_000;
+
+function openaiFooter(a: ChatAnswer, ctx: ReviewContext, retried: string): string {
   return (
     `---\n<sub>OpenAI-compatible API · ${ctx.files} files · ${a.inputTokens.toLocaleString("en")} in / ${a.outputTokens.toLocaleString("en")} out tokens` +
-    ` · took ${duration(Math.round(a.ms / 1000))} · ${LINK}</sub>${omittedList(ctx)}`
+    ` · took ${duration(Math.round(a.ms / 1000))}${retried} · ${LINK}</sub>${omittedList(ctx)}`
   );
 }
 

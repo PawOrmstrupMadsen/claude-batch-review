@@ -17,6 +17,9 @@ inputs:
   openai-model:
     description: "Backend openai: the model name sent in the request. The comment names the model the server reports."
     default: ''
+  openai-reasoning-effort:
+    description: "Backend openai: sent as top-level `reasoning_effort` (for example low, medium or high) when set; nothing otherwise. An answer that is empty, or cut off at max-output-tokens before its verdict, is retried once at low (at the same effort when it already is low)."
+    default: ''
   openai-api-key:
     description: "Backend openai: sent as `Authorization: Bearer` when set; no header otherwise."
     default: ''

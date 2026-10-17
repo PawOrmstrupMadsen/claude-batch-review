@@ -43,6 +43,8 @@ export interface ChatRequest {
   apiKey: string;
   model: string;
   maxTokens: number;
+  /** Sent as top-level `reasoning_effort` when set; the server's default otherwise. */
+  reasoningEffort?: string;
   timeoutMs: number;
   system: string;
   user: string;
@@ -85,6 +87,7 @@ async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequ
   const body = JSON.stringify({
     model: r.model,
     max_tokens: r.maxTokens,
+    ...(r.reasoningEffort ? { reasoning_effort: r.reasoningEffort } : {}),
     stream: false,
     messages: [
       { role: "system", content: r.system },
@@ -143,12 +146,23 @@ function parseCompletion(text: string, requested: string, ms: number): ChatResul
 }
 
 /**
- * Reasoning models on some servers put their thinking in the content, ahead of the first `</think>`
- * (with or without the opening tag). A `</think>` after the verdict line is part of the review itself.
+ * Reasoning models on some servers put their thinking in the content, ahead of a `</think>` (with or
+ * without the opening tag). Thinking can itself quote `</think>`, which makes a server end the reasoning
+ * there and send the rest as content, and a review can quote it too. The answer starts with a complete
+ * verdict line, so the last unquoted `</think>` followed by one ends the thinking; failing that, the
+ * first `</think>` does, unless a verdict line comes before it.
  */
+const VERDICT_LINE = /^\*\*Verdict:\*\*\s*(✅|⚠|❌)/u;
+
 export function stripThinking(text: string): string {
   const t = text.trim();
-  const end = t.indexOf("</think>");
+  const tag = "</think>";
+  for (let at = t.lastIndexOf(tag); at >= 0; at = at === 0 ? -1 : t.lastIndexOf(tag, at - 1)) {
+    if (t[at - 1] === "`") continue;
+    const rest = t.slice(at + tag.length).trim();
+    if (VERDICT_LINE.test(rest)) return rest;
+  }
+  const end = t.indexOf(tag);
   if (end < 0) return t;
   const before = t.slice(0, end);
   if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();

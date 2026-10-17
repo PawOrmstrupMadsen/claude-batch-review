@@ -15,6 +15,7 @@ const openai = (extra: Record<string, string> = {}) => ({
   "openai-base-url": "http://llm.test:8000/v1/",
   "openai-model": "local",
   mode: "pass",
+  "max-wait-minutes": "5",
   ...extra,
 });
 const answer = (text: string, extra = {}) => () => ({ status: 200, text: JSON.stringify(completion(text, extra)) });
@@ -138,6 +139,87 @@ describe("backend openai", () => {
     assert.equal(w.comments.length, 1, "the sticky comment is rewritten");
   });
 
+  it("sends reasoning_effort only when it is set", async () => {
+    const w = new World();
+    actionEnv(openai());
+    await run(w);
+    assert.equal("reasoning_effort" in w.chats[0].body, false);
+
+    const m = new World();
+    actionEnv(openai({ "openai-reasoning-effort": "medium" }));
+    await run(m);
+    assert.equal(m.chats[0].body.reasoning_effort, "medium");
+  });
+
+  const thinkingOnly = { status: 200, text: JSON.stringify(completion("", { choices: [{ message: { content: "", reasoning_content: "…" }, finish_reason: "length" }] })) };
+  const pass = answer("**Verdict:** ✅ Looks good.");
+
+  it("retries an empty answer once at low, and says so", async () => {
+    const w = new World();
+    w.chat = (n) => (n === 0 ? thinkingOnly : pass());
+    actionEnv(openai({ "openai-reasoning-effort": "medium" }));
+    assert.equal(await run(w), 0);
+    assert.deepEqual(w.chats.map((c) => c.body.reasoning_effort), ["medium", "low"]);
+    assert.equal(state(w)?.verdict, "pass");
+    assert.match(w.comment, /retried at reasoning effort low after an empty answer/);
+    assert.doesNotMatch(w.comment, /Empty response/);
+  });
+
+  it("retries at low when no effort was set, and at low again when it was low", async () => {
+    const w = new World();
+    w.chat = (n) => (n === 0 ? thinkingOnly : pass());
+    actionEnv(openai());
+    await run(w);
+    assert.deepEqual(w.chats.map((c) => c.body.reasoning_effort), [undefined, "low"]);
+
+    const l = new World();
+    l.chat = (n) => (n === 0 ? thinkingOnly : pass());
+    actionEnv(openai({ "openai-reasoning-effort": "low" }));
+    await run(l);
+    assert.deepEqual(l.chats.map((c) => c.body.reasoning_effort), ["low", "low"]);
+  });
+
+  it("retries an answer cut off before its verdict, not one cut off after it", async () => {
+    const cut = (text: string) => () => ({ status: 200, text: JSON.stringify(completion(text, { choices: [{ message: { content: text }, finish_reason: "length" }] })) });
+    const w = new World();
+    w.chat = (n) => (n === 0 ? cut("Let me look at the diff first and")() : pass());
+    actionEnv(openai());
+    assert.equal(await run(w), 0);
+    assert.equal(w.chats.length, 2);
+    assert.match(w.comment, /after an answer cut off before its verdict/);
+
+    const v = new World();
+    v.chat = cut("**Verdict:** ⚠️ Minor issues. Fine.\n\n### Findings\n1. a");
+    actionEnv(openai());
+    assert.equal(await run(v), 0);
+    assert.equal(v.chats.length, 1);
+    assert.match(v.comment, /Cut off at `max-output-tokens`/);
+  });
+
+  it("retries only once and fails a second empty answer", async () => {
+    const w = new World();
+    w.chat = () => thinkingOnly;
+    actionEnv(openai());
+    assert.equal(await run(w), 1);
+    assert.equal(w.chats.length, 2);
+    assert.equal(state(w)?.verdict, "unknown");
+    assert.match(w.comment, /_Empty response\._[\s\S]*retried at reasoning effort low/);
+  });
+
+  it("gives the retry only what is left of max-wait-minutes", async () => {
+    const w = new World();
+    w.chat = (n) => (n === 0 ? thinkingOnly : pass());
+    actionEnv(openai({ "max-wait-minutes": "10" }));
+    await run(w);
+    assert.ok(w.chats[1].timeoutMs <= w.chats[0].timeoutMs);
+
+    const short = new World();
+    short.chat = () => thinkingOnly;
+    actionEnv(openai({ "max-wait-minutes": "0.5" }));
+    await run(short);
+    assert.equal(short.chats.length, 1, "no retry with under a minute left");
+  });
+
   it("skips a fork pull request", async () => {
     const w = new World();
     Object.assign(w.pr.base, { repo: { full_name: "o/r" } });
@@ -183,7 +265,15 @@ describe("stripThinking", () => {
     assert.equal(stripThinking("<think>a</think>\n\nb"), "b");
     assert.equal(stripThinking("a</think>\n\nb </think> c"), "b </think> c");
   });
-  it("keeps a review that mentions </think> after its verdict", () => {
+  it("finds the answer when thinking quoted </think> and the server split there", () => {
+    const leaked = "…check `**Verdict:**` handling and `</think>` too.\nDone thinking.\n</think>\n\n**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.";
+    assert.equal(stripThinking(leaked), "**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.");
+  });
+  it("skips a quoted </think> and an incomplete verdict line in the review", () => {
+    const review = "**Verdict:** ❌ Changes needed. Breaks parsing.\n\n### Findings\n1. a remainder like\n   ```\n   </think>\n   **Verdict:** is the marker\n   ```\n   and `</think>`**Verdict:** ✅ both fool it";
+    assert.equal(stripThinking(`thinking…\n</think>\n\n${review}`), review);
+  });
+    it("keeps a review that mentions </think> after its verdict", () => {
     const review = "**Verdict:** ⚠️ Minor issues. Parses `</think>`.\n\n### Findings\n1. strips text after `</think>`";
     assert.equal(stripThinking(review), review);
   });
