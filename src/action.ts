@@ -243,7 +243,7 @@ async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Pro
       log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
       r = await ask(effort);
       if (!r.ok) return fail(cfg.model, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})`);
-      a = { ...r.answer, ms: first.ms + r.answer.ms };
+      a = { ...r.answer, ms: first.ms + r.answer.ms, inputTokens: first.inputTokens + r.answer.inputTokens, outputTokens: first.outputTokens + r.answer.outputTokens };
       retried = ` · retried at reasoning effort ${effort} after ${first.text ? "an answer cut off before its verdict" : "an empty answer"}`;
     }
     const truncated = a.truncated ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";

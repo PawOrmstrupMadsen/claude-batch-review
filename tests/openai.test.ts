@@ -269,7 +269,11 @@ describe("stripThinking", () => {
     const leaked = "…check `**Verdict:**` handling and `</think>` too.\nDone thinking.\n</think>\n\n**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.";
     assert.equal(stripThinking(leaked), "**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.");
   });
-  it("keeps a review that mentions </think> after its verdict", () => {
+  it("skips a quoted </think> and an incomplete verdict line in the review", () => {
+    const review = "**Verdict:** ❌ Changes needed. Breaks parsing.\n\n### Findings\n1. a remainder like\n   ```\n   </think>\n   **Verdict:** is the marker\n   ```\n   and `</think>`**Verdict:** ✅ both fool it";
+    assert.equal(stripThinking(`thinking…\n</think>\n\n${review}`), review);
+  });
+    it("keeps a review that mentions </think> after its verdict", () => {
     const review = "**Verdict:** ⚠️ Minor issues. Parses `</think>`.\n\n### Findings\n1. strips text after `</think>`";
     assert.equal(stripThinking(review), review);
   });

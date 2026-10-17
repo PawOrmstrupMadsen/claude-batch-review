@@ -21266,12 +21266,14 @@ function parseCompletion(text, requested, ms) {
     }
   };
 }
+var VERDICT_LINE = /^\*\*Verdict:\*\*\s*(✅|⚠|❌)/u;
 function stripThinking(text) {
   const t = text.trim();
   const tag = "</think>";
   for (let at = t.lastIndexOf(tag); at >= 0; at = at === 0 ? -1 : t.lastIndexOf(tag, at - 1)) {
+    if (t[at - 1] === "`") continue;
     const rest = t.slice(at + tag.length).trim();
-    if (rest.startsWith("**Verdict:**")) return rest;
+    if (VERDICT_LINE.test(rest)) return rest;
   }
   const end = t.indexOf(tag);
   if (end < 0) return t;
@@ -21487,7 +21489,7 @@ ${c.guidance || "(The repository has no guidance files.)"}`,
       log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
       r = await ask2(effort);
       if (!r.ok) return fail(cfg.model, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})`);
-      a = { ...r.answer, ms: first.ms + r.answer.ms };
+      a = { ...r.answer, ms: first.ms + r.answer.ms, inputTokens: first.inputTokens + r.answer.inputTokens, outputTokens: first.outputTokens + r.answer.outputTokens };
       retried = ` \xB7 retried at reasoning effort ${effort} after ${first.text ? "an answer cut off before its verdict" : "an empty answer"}`;
     }
     const truncated = a.truncated ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
