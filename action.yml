@@ -19,7 +19,7 @@ inputs:
     default: ''
   openai-api-key:
     description: "Backend openai: sent as `Authorization: Bearer` when set; no header otherwise."
-    default: 
+    default: ''
   github-token:
     description: Token that reads the PR and writes its comment.
     default: ${{ github.token }}

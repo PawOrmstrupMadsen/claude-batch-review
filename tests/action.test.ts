@@ -189,6 +189,21 @@ describe("main", () => {
     assert.equal(w.batches.length, 1);
   });
 
+  it("waits 20 minutes for a batch when max-wait-minutes is unset", async () => {
+    const w = new World();
+    w.pollsToEnd = Number.POSITIVE_INFINITY;
+    let now = 0;
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      actionEnv({ "api-keys": "k1", "max-wait-minutes": "" });
+      await main({ fetch: w.fetch, sleep: async (ms) => void (now += ms) });
+    } finally {
+      Date.now = realNow;
+    }
+    assert.ok(now > 20 * 60_000 && now < 21 * 60_000, `waited ${now} ms`);
+  });
+
   it("rejects an unknown mode", async () => {
     actionEnv({ "api-keys": "k1", mode: "required" });
     assert.equal(await main({ fetch: new World().fetch, sleep: noSleep }), 1);

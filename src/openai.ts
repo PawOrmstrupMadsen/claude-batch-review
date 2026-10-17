@@ -71,6 +71,13 @@ const RETRY_MS = 30_000;
 
 /** Sends the review prompt and returns the answer, or why there is none. Never throws for HTTP or network errors. */
 export async function chatReview(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequest): Promise<ChatResult> {
+  // What the server says goes into the PR comment, which no log mask covers: never let it carry the key.
+  const scrub = (s: string) => (r.apiKey ? s.split(r.apiKey).join("***") : s);
+  const result = await ask(post, sleep, r);
+  return result.ok ? result : { ok: false, why: scrub(result.why) };
+}
+
+async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequest): Promise<ChatResult> {
   const url = `${r.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const headers: Record<string, string> = { "content-type": "application/json", "user-agent": "claude-batch-review" };
   if (r.apiKey) headers.authorization = `Bearer ${r.apiKey}`;
@@ -105,7 +112,7 @@ export async function chatReview(post: Post, sleep: (ms: number) => Promise<void
       await sleep(RETRY_MS);
       continue;
     }
-    if (/context|too long|too large/i.test(msg))
+    if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
       return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.` };
     return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}` };
   }
@@ -121,7 +128,7 @@ function parseCompletion(text: string, requested: string, ms: number): ChatResul
   const choice = c.choices?.[0];
   if (!choice) return { ok: false, why: "the endpoint answered without a choice." };
   const content = choice.message?.content;
-  const raw = typeof content === "string" ? content : (content ?? []).map((p) => p.text ?? "").join("");
+  const raw = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "";
   return {
     ok: true,
     answer: {
@@ -135,10 +142,17 @@ function parseCompletion(text: string, requested: string, ms: number): ChatResul
   };
 }
 
-/** Reasoning models on some servers put their thinking in the content, ahead of `</think>`. */
+/**
+ * Reasoning models on some servers put their thinking in the content, ahead of the first `</think>`
+ * (with or without the opening tag). A `</think>` after the verdict line is part of the review itself.
+ */
 export function stripThinking(text: string): string {
-  const end = text.lastIndexOf("</think>");
-  return (end >= 0 ? text.slice(end + "</think>".length) : text).trim();
+  const t = text.trim();
+  const end = t.indexOf("</think>");
+  if (end < 0) return t;
+  const before = t.slice(0, end);
+  if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();
+  return t;
 }
 
 function errorMessage(body: string): string {

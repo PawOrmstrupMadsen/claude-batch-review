@@ -110,6 +110,13 @@ async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Pro
   if (openaiKey) log.mask(openaiKey);
   const baseUrl = input("openai-base-url");
   if (openai && (!baseUrl || !cfg.model)) throw new Error("backend openai needs the `openai-base-url` and `openai-model` inputs.");
+  if (openai && openaiKey && !baseUrl.startsWith("https:"))
+    log.warning("openai-api-key goes to a plain-HTTP endpoint: keep that endpoint on a private network.");
+  // A fork PR's token cannot write the comment, and its untrusted code should not reach a private endpoint unasked.
+  if (openai && pr.head.repo?.full_name !== pr.base.repo?.full_name) {
+    log.notice("Fork pull request: the openai backend skips it.");
+    return { status: "skipped", overridden };
+  }
   if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
     return { status: "skipped", overridden };

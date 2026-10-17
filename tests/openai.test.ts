@@ -138,6 +138,33 @@ describe("backend openai", () => {
     assert.equal(w.comments.length, 1, "the sticky comment is rewritten");
   });
 
+  it("skips a fork pull request", async () => {
+    const w = new World();
+    Object.assign(w.pr.base, { repo: { full_name: "o/r" } });
+    Object.assign(w.pr.head, { repo: { full_name: "mallory/r" } });
+    const out = actionEnv(openai({ mode: "advisory" }));
+    assert.equal(await run(w), 0);
+    assert.equal(w.chats.length, 0);
+    assert.equal(out().status, "skipped");
+  });
+
+  it("keeps the key out of the comment when the server echoes it", async () => {
+    const w = new World();
+    w.chat = () => ({ status: 500, text: "upstream said: Bearer sk-secret" });
+    actionEnv(openai({ "openai-api-key": "sk-secret" }));
+    assert.equal(await run(w), 1);
+    assert.doesNotMatch(w.comment, /sk-secret/);
+    assert.match(w.comment, /HTTP 500 upstream said: Bearer \*\*\*/);
+  });
+
+  it("does not take a server error that mentions context for an overflow", async () => {
+    const w = new World();
+    w.chat = () => ({ status: 500, text: "internal error in request context" });
+    actionEnv(openai());
+    await run(w);
+    assert.doesNotMatch(w.comment, /does not fit/);
+  });
+
   it("needs a base URL and a model", async () => {
     actionEnv(openai({ "openai-base-url": "" }));
     assert.equal(await run(new World()), 1);
@@ -152,7 +179,14 @@ describe("backend openai", () => {
 });
 
 describe("stripThinking", () => {
-  it("keeps what follows the last </think>", () => assert.equal(stripThinking("a</think>\n\nb"), "b"));
+  it("drops thinking before the first </think>", () => {
+    assert.equal(stripThinking("<think>a</think>\n\nb"), "b");
+    assert.equal(stripThinking("a</think>\n\nb </think> c"), "b </think> c");
+  });
+  it("keeps a review that mentions </think> after its verdict", () => {
+    const review = "**Verdict:** ⚠️ Minor issues. Parses `</think>`.\n\n### Findings\n1. strips text after `</think>`";
+    assert.equal(stripThinking(review), review);
+  });
   it("leaves plain text alone", () => assert.equal(stripThinking("  b \n"), "b"));
 });
 

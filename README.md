@@ -69,8 +69,9 @@ example a self-hosted model server, when the Anthropic keys are out of credit or
 - Verdict, sticky comment, `mode` and the override label work as with Claude. A prompt larger than the model's
   context fails the job with that error: lower `max-input-tokens` to the model's context minus
   `max-output-tokens`.
-- No key is sent unless `openai-api-key` is set. With no secrets involved, fork PRs are reviewed too, so keep
-  such endpoints to private repos on self-hosted runners that can reach them.
+- No key is sent unless `openai-api-key` is set (a warning when it goes over plain HTTP), and the key is
+  scrubbed from any server error quoted in the comment. Fork PRs are skipped, as with the Anthropic backend
+  (where they get no secrets): their token cannot write the comment.
 
 ## Releases and pinning
 

@@ -21199,6 +21199,11 @@ var httpPost = (url, headers, body, timeoutMs) => new Promise((resolve2, reject)
 var RETRIES = 2;
 var RETRY_MS = 3e4;
 async function chatReview(post, sleep2, r) {
+  const scrub = (s) => r.apiKey ? s.split(r.apiKey).join("***") : s;
+  const result = await ask(post, sleep2, r);
+  return result.ok ? result : { ok: false, why: scrub(result.why) };
+}
+async function ask(post, sleep2, r) {
   const url = `${r.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const headers = { "content-type": "application/json", "user-agent": "claude-batch-review" };
   if (r.apiKey) headers.authorization = `Bearer ${r.apiKey}`;
@@ -21232,7 +21237,7 @@ async function chatReview(post, sleep2, r) {
       await sleep2(RETRY_MS);
       continue;
     }
-    if (/context|too long|too large/i.test(msg))
+    if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
       return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.` };
     return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}` };
   }
@@ -21247,7 +21252,7 @@ function parseCompletion(text, requested, ms) {
   const choice = c.choices?.[0];
   if (!choice) return { ok: false, why: "the endpoint answered without a choice." };
   const content = choice.message?.content;
-  const raw = typeof content === "string" ? content : (content ?? []).map((p) => p.text ?? "").join("");
+  const raw = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "";
   return {
     ok: true,
     answer: {
@@ -21261,8 +21266,12 @@ function parseCompletion(text, requested, ms) {
   };
 }
 function stripThinking(text) {
-  const end = text.lastIndexOf("</think>");
-  return (end >= 0 ? text.slice(end + "</think>".length) : text).trim();
+  const t = text.trim();
+  const end = t.indexOf("</think>");
+  if (end < 0) return t;
+  const before = t.slice(0, end);
+  if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();
+  return t;
 }
 function errorMessage(body) {
   try {
@@ -21348,6 +21357,12 @@ async function run({ overrideLabel, backend, event }, deps) {
   if (openaiKey) log.mask(openaiKey);
   const baseUrl = input("openai-base-url");
   if (openai && (!baseUrl || !cfg.model)) throw new Error("backend openai needs the `openai-base-url` and `openai-model` inputs.");
+  if (openai && openaiKey && !baseUrl.startsWith("https:"))
+    log.warning("openai-api-key goes to a plain-HTTP endpoint: keep that endpoint on a private network.");
+  if (openai && pr.head.repo?.full_name !== pr.base.repo?.full_name) {
+    log.notice("Fork pull request: the openai backend skips it.");
+    return { status: "skipped", overridden };
+  }
   if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
     return { status: "skipped", overridden };
