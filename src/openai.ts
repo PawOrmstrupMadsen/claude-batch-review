@@ -43,6 +43,8 @@ export interface ChatRequest {
   apiKey: string;
   model: string;
   maxTokens: number;
+  /** Sent as top-level `reasoning_effort` when set; the server's default otherwise. */
+  reasoningEffort?: string;
   timeoutMs: number;
   system: string;
   user: string;
@@ -85,6 +87,7 @@ async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequ
   const body = JSON.stringify({
     model: r.model,
     max_tokens: r.maxTokens,
+    ...(r.reasoningEffort ? { reasoning_effort: r.reasoningEffort } : {}),
     stream: false,
     messages: [
       { role: "system", content: r.system },

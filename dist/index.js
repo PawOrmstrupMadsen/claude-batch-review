@@ -21210,6 +21210,7 @@ async function ask(post, sleep2, r) {
   const body = JSON.stringify({
     model: r.model,
     max_tokens: r.maxTokens,
+    ...r.reasoningEffort ? { reasoning_effort: r.reasoningEffort } : {},
     stream: false,
     messages: [
       { role: "system", content: r.system },
@@ -21350,6 +21351,7 @@ async function run({ overrideLabel, backend, event }, deps) {
     maxInputTokens: num("max-input-tokens", 3e5),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 6e4,
     promptFile: input("prompt-file"),
+    reasoningEffort: input("openai-reasoning-effort"),
     force: input("force") === "true"
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
@@ -21457,26 +21459,39 @@ async function run({ overrideLabel, backend, event }, deps) {
       `${header(cfg.model)}\u23F3 Reviewing with \`${cfg.model}\`. This comment becomes the review when the model answers.`
     );
     log.info(`Asking ${cfg.model} at ${baseUrl} (waits up to ${cfg.maxWaitMs / 6e4} min).`);
-    const r = await chatReview(deps.post ?? httpPost, sleep2, {
+    const deadline = Date.now() + cfg.maxWaitMs;
+    const ask2 = (reasoningEffort) => chatReview(deps.post ?? httpPost, sleep2, {
       baseUrl,
       apiKey: openaiKey,
       model: cfg.model,
       maxTokens: cfg.maxOutputTokens,
-      timeoutMs: cfg.maxWaitMs,
+      reasoningEffort,
+      timeoutMs: Math.max(1, deadline - Date.now()),
       system: `${SYSTEM_PROMPT}
 
 ${c.guidance || "(The repository has no guidance files.)"}`,
       user: c.text
     });
+    let r = await ask2(cfg.reasoningEffort);
     if (!r.ok) return fail(cfg.model, r.why);
-    const a = r.answer;
+    let a = r.answer;
+    let retried = "";
+    if (thoughtOut(a) && deadline - Date.now() > MIN_RETRY_MS) {
+      const effort = cfg.reasoningEffort === "low" ? "low" : RETRY_EFFORT;
+      const first = a;
+      log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
+      r = await ask2(effort);
+      if (!r.ok) return fail(cfg.model, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})`);
+      a = { ...r.answer, ms: first.ms + r.answer.ms };
+      retried = ` \xB7 retried at reasoning effort ${effort} after ${first.text ? "an answer cut off before its verdict" : "an empty answer"}`;
+    }
     const truncated = a.truncated ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
     const verdict = parseVerdict(a.text);
     await upsert(
       { status: "done", verdict, sha: pr.head.sha, model: a.model },
       `${header(a.model)}${a.text || "_Empty response._"}${truncated}
 
-${openaiFooter(a, c)}`
+${openaiFooter(a, c, retried)}`
     );
     log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
     return { status: "done", verdict, overridden };
@@ -21584,9 +21599,14 @@ function footer(msg, job, batch, keyCount, ctx) {
   return `---
 <sub>Message Batches API \xB7 ${ctx.files} files \xB7 ${input2.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost} \xB7 batch took ${duration(waited)} \xB7 key ${job.slot + 1}/${keyCount} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
 }
-function openaiFooter(a, ctx) {
+function thoughtOut(a) {
+  return !a.text || a.truncated && parseVerdict(a.text) === "unknown";
+}
+var RETRY_EFFORT = "low";
+var MIN_RETRY_MS = 6e4;
+function openaiFooter(a, ctx, retried) {
   return `---
-<sub>OpenAI-compatible API \xB7 ${ctx.files} files \xB7 ${a.inputTokens.toLocaleString("en")} in / ${a.outputTokens.toLocaleString("en")} out tokens \xB7 took ${duration(Math.round(a.ms / 1e3))} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
+<sub>OpenAI-compatible API \xB7 ${ctx.files} files \xB7 ${a.inputTokens.toLocaleString("en")} in / ${a.outputTokens.toLocaleString("en")} out tokens \xB7 took ${duration(Math.round(a.ms / 1e3))}${retried} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
 }
 var LINK = "[claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)";
 function duration(s) {
