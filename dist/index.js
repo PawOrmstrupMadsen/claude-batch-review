@@ -21170,6 +21170,124 @@ var GitHub = class {
   }
 };
 
+// src/openai.ts
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+var TimeoutError = class extends Error {
+};
+var httpPost = (url, headers, body, timeoutMs) => new Promise((resolve2, reject) => {
+  const u = new URL(url);
+  const send = u.protocol === "https:" ? httpsRequest : httpRequest;
+  let timer;
+  const fail = (e) => {
+    clearTimeout(timer);
+    reject(e);
+  };
+  const req = send(u, { method: "POST", headers: { ...headers, "content-length": String(Buffer.byteLength(body)) } }, (res) => {
+    const chunks = [];
+    res.on("data", (c) => chunks.push(c));
+    res.on("error", fail);
+    res.on("end", () => {
+      clearTimeout(timer);
+      resolve2({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") });
+    });
+  });
+  timer = setTimeout(() => req.destroy(new TimeoutError(`no answer within ${Math.round(timeoutMs / 6e4)} min`)), timeoutMs);
+  req.on("error", fail);
+  req.end(body);
+});
+var RETRIES = 2;
+var RETRY_MS = 3e4;
+async function chatReview(post, sleep2, r) {
+  const scrub = (s) => r.apiKey ? s.split(r.apiKey).join("***") : s;
+  const result = await ask(post, sleep2, r);
+  return result.ok ? result : { ok: false, why: scrub(result.why) };
+}
+async function ask(post, sleep2, r) {
+  const url = `${r.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const headers = { "content-type": "application/json", "user-agent": "claude-batch-review" };
+  if (r.apiKey) headers.authorization = `Bearer ${r.apiKey}`;
+  const body = JSON.stringify({
+    model: r.model,
+    max_tokens: r.maxTokens,
+    stream: false,
+    messages: [
+      { role: "system", content: r.system },
+      { role: "user", content: r.user }
+    ]
+  });
+  const start = Date.now();
+  const deadline = start + r.timeoutMs;
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await post(url, headers, body, Math.max(1, deadline - Date.now()));
+    } catch (e) {
+      if (e instanceof TimeoutError) return { ok: false, why: `the model gave ${e.message}.` };
+      const why = `could not reach the endpoint: \`${errorText2(e)}\`.`;
+      if (attempt < RETRIES && deadline - Date.now() > RETRY_MS) {
+        await sleep2(RETRY_MS);
+        continue;
+      }
+      return { ok: false, why };
+    }
+    if (res.status >= 200 && res.status < 300) return parseCompletion(res.text, r.model, Date.now() - start);
+    const msg = errorMessage(res.text);
+    if ([502, 503, 504].includes(res.status) && attempt < RETRIES && deadline - Date.now() > RETRY_MS) {
+      await sleep2(RETRY_MS);
+      continue;
+    }
+    if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
+      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.` };
+    return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}` };
+  }
+}
+function parseCompletion(text, requested, ms) {
+  let c;
+  try {
+    c = JSON.parse(text);
+  } catch {
+    return { ok: false, why: `the endpoint answered with something other than JSON: \`${text.slice(0, 200)}\`` };
+  }
+  const choice = c.choices?.[0];
+  if (!choice) return { ok: false, why: "the endpoint answered without a choice." };
+  const content = choice.message?.content;
+  const raw = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "";
+  return {
+    ok: true,
+    answer: {
+      model: c.model || requested,
+      text: stripThinking(raw),
+      truncated: choice.finish_reason === "length",
+      inputTokens: c.usage?.prompt_tokens ?? 0,
+      outputTokens: c.usage?.completion_tokens ?? 0,
+      ms
+    }
+  };
+}
+function stripThinking(text) {
+  const t = text.trim();
+  const end = t.indexOf("</think>");
+  if (end < 0) return t;
+  const before = t.slice(0, end);
+  if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();
+  return t;
+}
+function errorMessage(body) {
+  try {
+    const j = JSON.parse(body);
+    const m = typeof j.error === "string" ? j.error : j.error?.message ?? j.message;
+    if (m) return m.slice(0, 500);
+  } catch {
+  }
+  return body.slice(0, 500) || "(empty body)";
+}
+function errorText2(e) {
+  if (!(e instanceof Error)) return String(e);
+  const code = e.code;
+  return code ? `${code} ${e.message}` : e.message;
+}
+
 // src/prompt.ts
 var SYSTEM_PROMPT = `You are reviewing a GitHub pull request. Your review is posted as one PR comment that the author (often another AI coding agent) acts on before merging.
 
@@ -21209,7 +21327,7 @@ var PRICES = {
   "claude-sonnet-5-5": [2, 10],
   "claude-haiku-5-5": [0.1, 0.5]
 };
-async function run({ overrideLabel, event }, deps) {
+async function run({ overrideLabel, backend, event }, deps) {
   const sleep2 = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const keys = input("api-keys").split(/\r?\n/).map((k) => k.trim()).filter((k) => k && !k.startsWith("#"));
   keys.forEach(log.mask);
@@ -21223,18 +21341,29 @@ async function run({ overrideLabel, event }, deps) {
   const prNumber = Number(input("pr") || event.pull_request?.number || "");
   if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
   const pr = await gh.json(`/repos/${owner}/${repo}/pulls/${prNumber}`);
+  const openai = backend === "openai";
   const cfg = {
-    model: input("model", "claude-opus-5-5"),
+    model: openai ? input("openai-model") : input("model", "claude-opus-5-5"),
     fallbackModel: input("fallback-model", "claude-opus-4-8"),
     effort: input("effort", "high"),
     maxOutputTokens: num("max-output-tokens", 32e3),
     maxInputTokens: num("max-input-tokens", 3e5),
-    maxWaitMs: num("max-wait-minutes", 20) * 6e4,
+    maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 6e4,
     promptFile: input("prompt-file"),
     force: input("force") === "true"
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
-  if (keys.length === 0) {
+  const openaiKey = input("openai-api-key");
+  if (openaiKey) log.mask(openaiKey);
+  const baseUrl = input("openai-base-url");
+  if (openai && (!baseUrl || !cfg.model)) throw new Error("backend openai needs the `openai-base-url` and `openai-model` inputs.");
+  if (openai && openaiKey && !baseUrl.startsWith("https:"))
+    log.warning("openai-api-key goes to a plain-HTTP endpoint: keep that endpoint on a private network.");
+  if (openai && pr.head.repo?.full_name !== pr.base.repo?.full_name) {
+    log.notice("Fork pull request: the openai backend skips it.");
+    return { status: "skipped", overridden };
+  }
+  if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
     return { status: "skipped", overridden };
   }
@@ -21247,12 +21376,12 @@ async function run({ overrideLabel, event }, deps) {
     return { status: "done", verdict: prior.verdict ?? parseVerdict(comment?.body ?? ""), overridden };
   }
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
-  const resumable = prior?.status === "pending" && prior.sha === pr.head.sha;
+  const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
   if (labelEvent && (overridden || !resumable)) {
     log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
     return { status: prior?.sha === pr.head.sha && prior.status === "failed" ? "failed" : "pending", overridden };
   }
-  if (prior?.status === "pending" && prior.batch) {
+  if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
     if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
       job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted: prior.submitted ?? "" };
@@ -21309,7 +21438,7 @@ async function run({ overrideLabel, event }, deps) {
       comment = await gh.json(`${base}/${prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: full }) });
     }
   };
-  const header = (model) => `## Claude review \xB7 \`${model}\` \xB7 ${sha7}
+  const header = (model) => `## ${openai ? "Review" : "Claude review"} \xB7 \`${model}\` \xB7 ${sha7}
 
 `;
   const queue = async (j) => upsert(
@@ -21321,7 +21450,39 @@ async function run({ overrideLabel, event }, deps) {
     log.warning(why);
     return { status: "failed", overridden };
   };
+  const reviewOpenAI = async () => {
+    const c = await context();
+    await upsert(
+      { status: "pending", sha: pr.head.sha, model: cfg.model },
+      `${header(cfg.model)}\u23F3 Reviewing with \`${cfg.model}\`. This comment becomes the review when the model answers.`
+    );
+    log.info(`Asking ${cfg.model} at ${baseUrl} (waits up to ${cfg.maxWaitMs / 6e4} min).`);
+    const r = await chatReview(deps.post ?? httpPost, sleep2, {
+      baseUrl,
+      apiKey: openaiKey,
+      model: cfg.model,
+      maxTokens: cfg.maxOutputTokens,
+      timeoutMs: cfg.maxWaitMs,
+      system: `${SYSTEM_PROMPT}
+
+${c.guidance || "(The repository has no guidance files.)"}`,
+      user: c.text
+    });
+    if (!r.ok) return fail(cfg.model, r.why);
+    const a = r.answer;
+    const truncated = a.truncated ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
+    const verdict = parseVerdict(a.text);
+    await upsert(
+      { status: "done", verdict, sha: pr.head.sha, model: a.model },
+      `${header(a.model)}${a.text || "_Empty response._"}${truncated}
+
+${openaiFooter(a, c)}`
+    );
+    log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    return { status: "done", verdict, overridden };
+  };
   const review = async () => {
+    if (openai) return reviewOpenAI();
     if (!job) {
       job = await submit(0, cfg.model);
       if (!job) return fail(cfg.model, `none of the ${slots.length} API keys has credit left. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
@@ -21420,15 +21581,25 @@ function footer(msg, job, batch, keyCount, ctx) {
   const price = PRICES[msg.model];
   const cost = price ? ` \xB7 \u2248 $${((input2 * price[0] + u.output_tokens * price[1]) / 2 / 1e6).toFixed(3)}` : "";
   const waited = batch.ended_at ? Math.round((Date.parse(batch.ended_at) - Date.parse(batch.created_at)) / 1e3) : 0;
+  return `---
+<sub>Message Batches API \xB7 ${ctx.files} files \xB7 ${input2.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost} \xB7 batch took ${duration(waited)} \xB7 key ${job.slot + 1}/${keyCount} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
+}
+function openaiFooter(a, ctx) {
+  return `---
+<sub>OpenAI-compatible API \xB7 ${ctx.files} files \xB7 ${a.inputTokens.toLocaleString("en")} in / ${a.outputTokens.toLocaleString("en")} out tokens \xB7 took ${duration(Math.round(a.ms / 1e3))} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
+}
+var LINK = "[claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)";
+function duration(s) {
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+function omittedList(ctx) {
   const shown = ctx.omitted.slice(0, 50).map((o) => `- ${o}`);
   if (ctx.omitted.length > 50) shown.push(`- \u2026 and ${ctx.omitted.length - 50} more`);
-  const omitted = shown.length ? `
+  return shown.length ? `
 <details><summary>Not shown to the reviewer</summary>
 
 ${shown.join("\n")}
 </details>` : "";
-  return `---
-<sub>Message Batches API \xB7 ${ctx.files} files \xB7 ${input2.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost} \xB7 batch took ${Math.floor(waited / 60)}m${waited % 60}s \xB7 key ${job.slot + 1}/${keyCount} \xB7 [claude-batch-review](https://github.com/PawOrmstrupMadsen/claude-batch-review)</sub>${omitted}`;
 }
 async function findComment(gh, pr, author) {
   const comments = await gh.paginate(`/repos/${gh.owner}/${gh.repo}/issues/${pr}/comments`);
@@ -21461,13 +21632,18 @@ function blocker(mode, { status, verdict }) {
 async function main(deps = {}) {
   const mode = input("mode", "advisory");
   const overrideLabel = input("override-label", "review-override");
+  const backend = input("backend", "anthropic");
   const event = readEvent();
   if (!["advisory", "complete", "pass"].includes(mode)) {
     log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
     return 1;
   }
+  if (!["anthropic", "openai"].includes(backend)) {
+    log.error(`Input backend must be anthropic or openai, got "${backend}".`);
+    return 1;
+  }
   try {
-    const outcome = await run({ mode, overrideLabel, event }, deps);
+    const outcome = await run({ mode, overrideLabel, backend, event }, deps);
     setOutput("status", outcome.status);
     setOutput("verdict", outcome.verdict ?? "");
     const why = blocker(mode, outcome);

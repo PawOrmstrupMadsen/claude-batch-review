@@ -9,8 +9,8 @@ export interface Pull {
   labels: { name: string }[];
   html_url: string;
   user: { login: string };
-  base: { sha: string; ref: string };
-  head: { sha: string; ref: string };
+  base: { sha: string; ref: string; repo?: { full_name: string } | null };
+  head: { sha: string; ref: string; repo?: { full_name: string } | null };
 }
 
 interface PrFile {
