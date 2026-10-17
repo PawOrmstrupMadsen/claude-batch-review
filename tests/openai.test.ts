@@ -265,6 +265,10 @@ describe("stripThinking", () => {
     assert.equal(stripThinking("<think>a</think>\n\nb"), "b");
     assert.equal(stripThinking("a</think>\n\nb </think> c"), "b </think> c");
   });
+  it("finds the answer when thinking quoted </think> and the server split there", () => {
+    const leaked = "…check `**Verdict:**` handling and `</think>` too.\nDone thinking.\n</think>\n\n**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.";
+    assert.equal(stripThinking(leaked), "**Verdict:** ✅ Looks good. Fine.\n\n### Findings\nNo issues found; `</think>` handling is right.");
+  });
   it("keeps a review that mentions </think> after its verdict", () => {
     const review = "**Verdict:** ⚠️ Minor issues. Parses `</think>`.\n\n### Findings\n1. strips text after `</think>`";
     assert.equal(stripThinking(review), review);

@@ -21268,7 +21268,12 @@ function parseCompletion(text, requested, ms) {
 }
 function stripThinking(text) {
   const t = text.trim();
-  const end = t.indexOf("</think>");
+  const tag = "</think>";
+  for (let at = t.lastIndexOf(tag); at >= 0; at = at === 0 ? -1 : t.lastIndexOf(tag, at - 1)) {
+    const rest = t.slice(at + tag.length).trim();
+    if (rest.startsWith("**Verdict:**")) return rest;
+  }
+  const end = t.indexOf(tag);
   if (end < 0) return t;
   const before = t.slice(0, end);
   if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();
@@ -21477,7 +21482,7 @@ ${c.guidance || "(The repository has no guidance files.)"}`,
     let a = r.answer;
     let retried = "";
     if (thoughtOut(a) && deadline - Date.now() > MIN_RETRY_MS) {
-      const effort = cfg.reasoningEffort === "low" ? "low" : RETRY_EFFORT;
+      const effort = RETRY_EFFORT;
       const first = a;
       log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
       r = await ask2(effort);

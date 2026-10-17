@@ -238,7 +238,7 @@ async function run({ overrideLabel, backend, event }: Settings, deps: Deps): Pro
     let retried = "";
     // A reasoning model can spend the whole output budget thinking: ask once more, thinking less.
     if (thoughtOut(a) && deadline - Date.now() > MIN_RETRY_MS) {
-      const effort = cfg.reasoningEffort === "low" ? "low" : RETRY_EFFORT;
+      const effort = RETRY_EFFORT;
       const first = a;
       log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
       r = await ask(effort);
@@ -386,7 +386,7 @@ function thoughtOut(a: ChatAnswer): boolean {
   return !a.text || (a.truncated && parseVerdict(a.text) === "unknown");
 }
 
-/** The effort a retry uses when the first request asked for another one, or for none. */
+/** The effort a retry uses, whatever the first request asked for: `low` again when that was it. */
 const RETRY_EFFORT = "low";
 /** A retry needs at least this much of `max-wait-minutes` left. */
 const MIN_RETRY_MS = 60_000;

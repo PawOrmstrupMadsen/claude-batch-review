@@ -146,12 +146,20 @@ function parseCompletion(text: string, requested: string, ms: number): ChatResul
 }
 
 /**
- * Reasoning models on some servers put their thinking in the content, ahead of the first `</think>`
- * (with or without the opening tag). A `</think>` after the verdict line is part of the review itself.
+ * Reasoning models on some servers put their thinking in the content, ahead of a `</think>` (with or
+ * without the opening tag). Thinking can itself quote `</think>`, which makes a server end the reasoning
+ * there and send the rest as content, and a review can quote it too. The answer starts with its verdict
+ * line, so the last `</think>` followed by one ends the thinking; failing that, the first one does,
+ * unless the verdict line comes before it.
  */
 export function stripThinking(text: string): string {
   const t = text.trim();
-  const end = t.indexOf("</think>");
+  const tag = "</think>";
+  for (let at = t.lastIndexOf(tag); at >= 0; at = at === 0 ? -1 : t.lastIndexOf(tag, at - 1)) {
+    const rest = t.slice(at + tag.length).trim();
+    if (rest.startsWith("**Verdict:**")) return rest;
+  }
+  const end = t.indexOf(tag);
   if (end < 0) return t;
   const before = t.slice(0, end);
   if (t.startsWith("<think>") || !before.includes("**Verdict:**")) return t.slice(end + "</think>".length).trim();
