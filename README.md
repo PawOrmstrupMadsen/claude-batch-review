@@ -104,15 +104,21 @@ What falls back, after the key rotation and the SDK's own 4 retries:
 | 400 `invalid_request_error` "You have reached your specified (workspace) API usage limits" | when every key answers so | a spend limit set in the Console, until it resets |
 | 429 `rate_limit_error` "You have reached your API usage limits" (no `retry-after`) | when every key answers so | the tier's monthly spend cap, until the month ends |
 | 401 `authentication_error`, 403 `permission_error` | when every key answers so | a revoked or restricted key |
-| 429 `rate_limit_error` (a rate limit), 529 `overloaded_error`, other 5xx, no connection | yes | still failing after the retries; the review would otherwise wait for a manual re-run |
+| 429 `rate_limit_error` (a rate limit) | after the remaining keys | rate limits are per organisation, and another key may belong to another one |
+| 529 `overloaded_error`, other 5xx, no connection | yes | still failing after the retries; the review would otherwise wait for a manual re-run |
 | other 4xx (a request the API rejects) | no | the request itself is wrong: a fallback would hide the bug, and the job fails as before |
 | batch request `errored` for lack of credit on every key | yes | as for credit above |
+| a refusal whose retry on `fallback-model` finds no key with credit | yes | as for credit above |
 
 The comment then reads `## Review · <model>` with a line saying it is a fallback review and why, the
-footer ends `fallback from the Anthropic API`, and the job summary names the backend. A fallback that fails
+footer says `fallback from the Anthropic API`, the job summary names the backend, and the check run's title
+(with `checks: write`) reads `Review: ✅ Looks good (fallback: <model>)`, so a gate that reads the check
+sees it too. A fallback that fails
 too ends as no review (`No review: the model gave no answer`, …). Fork PRs never fall back, as the
-`openai` backend skips them. Without `fallback-backend` nothing changes. `max-wait-minutes` (default 30
-here) also bounds the fallback's wait: keep the job's `timeout-minutes` above both waits.
+`openai` backend skips them. Without `fallback-backend` nothing changes. The fallback waits up to
+`max-wait-minutes` of its own (default 30) after whatever the batch took, so one job can wait up to
+2 × `max-wait-minutes`: with a fallback, set `timeout-minutes` above that (the example's 45 minutes need
+`timeout-minutes: 100`).
 
 ## Releases and pinning
 

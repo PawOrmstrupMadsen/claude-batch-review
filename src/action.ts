@@ -81,6 +81,8 @@ export interface Outcome {
   next?: string;
   /** Who reviewed, for the job summary. */
   note?: string;
+  /** The model that reviewed through the fallback backend. */
+  fallbackModel?: string;
   sha?: string;
 }
 
@@ -194,6 +196,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       ],
       messages: [{ role: "user", content: c.text }],
     };
+    let down: AnthropicDown | null = null;
     for (let i = from; i < slots.length; i++) {
       try {
         const batch = await slots[i].client.messages.batches.create({
@@ -206,11 +209,18 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} — ${e.message}`);
           continue;
         }
-        const down = canFallBack ? apiDown(e) : null;
-        if (down) throw new AnthropicDown(down, e instanceof Error ? e.message : String(e));
-        throw e;
+        const why = canFallBack ? apiDown(e) : null;
+        if (!why) throw e;
+        down = new AnthropicDown(why, e instanceof Error ? e.message : String(e));
+        // Rate limits are per organisation, and the next key may belong to another one.
+        if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
+          log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
+          continue;
+        }
+        throw down;
       }
     }
+    if (down) throw down;
     return null;
   };
 
@@ -252,6 +262,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   };
 
   const reviewOpenAI = async (because = ""): Promise<Outcome> => {
+    running = { model: openaiModel, local: true };
     const c = await context();
     if (because) log.warning(`Falling back to the openai backend: ${because}.`);
     const via = because ? `> ↪️ Fallback review: ${because}, so \`${openaiModel}\` reviewed this instead of Claude.\n\n` : "";
@@ -298,7 +309,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     );
     log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
     const note = `Reviewed by \`${a.model}\` through the OpenAI-compatible API${because ? `, the fallback backend: ${because}` : ""}.`;
-    return { status: "done", verdict, overridden, sha, reason: bad.reason, note };
+    return { status: "done", verdict, overridden, sha, reason: bad.reason, note, ...(because ? { fallbackModel: a.model } : {}) };
   };
 
   const keysWhy = `none of the ${slots.length} API keys can be used (out of credit, at a spend limit, or refused).`;
@@ -309,6 +320,9 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       ? reviewOpenAI("no Anthropic API key can be used (out of credit, at a spend limit, or refused)")
       : fail(model, why, OUT_OF_CREDIT, "Add credit or a key to `ANTHROPIC_REVIEW_KEYS`, then re-run this job.");
   };
+
+  /** Whose comment a crash rewrites: the fallback's once it runs. */
+  let running = { model: cfg.model, local: openai };
 
   const reviewAnthropic = async (): Promise<Outcome> => {
     if (!job) {
@@ -394,7 +408,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
         { status: "pending", sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted },
         `${header(job.model)}⏳ Batch \`${job.batch}\` is queued, but the job hit an error (\`${why.slice(0, 300)}\`). Re-run the workflow to collect the result.`,
       ).catch(() => {});
-    else await fail(cfg.model, `the job hit an error: \`${why.slice(0, 300)}\``, crashReason(e)).catch(() => {});
+    else await fail(running.model, `the job hit an error: \`${why.slice(0, 300)}\``, crashReason(e), RETRY, running.local).catch(() => {});
     throw e;
   }
 }
@@ -550,16 +564,18 @@ function readEvent(): PrEvent {
 const VERDICT_NAMES: Record<Verdict, string> = { pass: "✅ Looks good", minor: "⚠️ Minor issues", changes: "❌ Changes needed", unknown: "no verdict" };
 
 /** One line on the outcome: "No review: <why>" without a usable review, else the verdict. */
-export function headline(o: Outcome): string {
+export function headline(o: Outcome, mode: Mode = "pass"): string {
   if (o.status !== "done") return `No review: ${o.reason ?? (o.status === "pending" ? "the batch is still running" : `the review ${o.status}`)}`;
-  if (!o.verdict || o.verdict === "unknown") return `No review: ${o.reason ?? NO_VERDICT}`;
-  return `Review: ${VERDICT_NAMES[o.verdict]}`;
+  const via = o.fallbackModel ? ` (fallback: ${o.fallbackModel})` : "";
+  // Only `pass` needs a verdict: elsewhere a review without one still counts.
+  if ((!o.verdict || o.verdict === "unknown") && mode === "pass") return `No review: ${o.reason ?? NO_VERDICT}${via}`;
+  return `Review: ${VERDICT_NAMES[o.verdict ?? "unknown"]}${via}`;
 }
 
 /** Why the gate blocks (the check's title) and what to do, or null when it lets the PR through. */
 export function blocker(mode: Mode, o: Outcome): { title: string; next: string } | null {
   if (mode === "advisory") return null;
-  const title = headline(o);
+  const title = headline(o, mode);
   if (o.status !== "done") return { title, next: o.next ?? (o.status === "pending" ? "Re-run this job to collect the batch." : RETRY) };
   if (mode === "pass" && o.verdict === "changes") return { title, next: "Fix the findings and push." };
   if (mode === "pass" && o.verdict === "unknown") return { title, next: o.next ?? FORCE };
@@ -618,12 +634,18 @@ export async function main(deps: Deps = {}): Promise<number> {
     setOutput("status", outcome.status);
     setOutput("verdict", outcome.verdict ?? "");
     const b = blocker(mode, outcome);
-    const way = b ? [b.next, label].filter(Boolean).join(" ") : "";
-    summary(`### ${headline(outcome)}\n\n${[way, outcome.note].filter(Boolean).join("\n\n")}`);
-    if (!b) return 0;
+    const title = headline(outcome, mode);
+    const overrides = `The \`${overrideLabel}\` label lets the pull request through.`;
+    const way = !b ? "" : outcome.overridden ? overrides : [b.next, label].filter(Boolean).join(" ");
+    summary(`### ${b && outcome.overridden ? `${title} (overridden by the label)` : title}\n\n${[way, outcome.note].filter(Boolean).join("\n\n")}`);
+    if (!b) {
+      // A gate that reads the check, not the comment, still sees that the fallback reviewed.
+      if (outcome.fallbackModel) await titleCheck(deps, [outcome.sha, ...shas], title, outcome.note ?? "");
+      return 0;
+    }
     if (outcome.overridden) {
       log.notice(`${b.title}. The \`${overrideLabel}\` label overrides it.`, b.title);
-      await titleCheck(deps, [outcome.sha, ...shas], `${b.title} (overridden by the label)`, `The \`${overrideLabel}\` label lets the pull request through.`);
+      await titleCheck(deps, [outcome.sha, ...shas], `${b.title} (overridden by the label)`, overrides);
       return 0;
     }
     log.error(`${b.title}. ${way}`, b.title);

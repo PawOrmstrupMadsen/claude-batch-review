@@ -47,7 +47,8 @@ jobs:
           mode: pass
           max-wait-minutes: 45
           # When every key is out of credit or the API stays rate-limited, review through an
-          # OpenAI-compatible endpoint instead (see the README, "Fallback backend"):
+          # OpenAI-compatible endpoint instead (see the README, "Fallback backend"). The job can
+          # then wait twice max-wait-minutes: raise timeout-minutes to 100.
           # fallback-backend: openai
           # openai-base-url: http://<model-server>:8000/v1
           # openai-model: <model>
