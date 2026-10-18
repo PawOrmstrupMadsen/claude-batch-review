@@ -9,19 +9,22 @@ inputs:
     description: "anthropic: Claude through the Message Batches API. openai: one synchronous request to an OpenAI-compatible chat completions endpoint (`openai-base-url`, `openai-model`); no batch, no keys needed."
     default: anthropic
   api-keys:
-    description: Anthropic API keys, one per line, used in order; a key that is out of credit is skipped. Lines starting with '#' are ignored. Backend anthropic only.
+    description: Anthropic API keys, one per line, used in order; a key that is out of credit, at a spend limit or refused is skipped. Lines starting with '#' are ignored. Backend anthropic only.
+    default: ''
+  fallback-backend:
+    description: "Backend anthropic: `openai` reviews through the openai inputs (`openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key`) in the same run when no key can be used (out of credit, at a spend limit, refused) or the API stays rate-limited, overloaded or down after the SDK's retries. Not for fork PRs. Empty: no fallback."
     default: ''
   openai-base-url:
-    description: "Backend openai: the API base URL, up to and including `/v1`; the action posts to `<base>/chat/completions`."
+    description: "Backend openai (or fallback-backend openai): the API base URL, up to and including `/v1`; the action posts to `<base>/chat/completions`."
     default: ''
   openai-model:
-    description: "Backend openai: the model name sent in the request. The comment names the model the server reports."
+    description: "Backend openai (or fallback-backend openai): the model name sent in the request. The comment names the model the server reports."
     default: ''
   openai-reasoning-effort:
-    description: "Backend openai: sent as top-level `reasoning_effort` (for example low, medium or high) when set; nothing otherwise. An answer that is empty, or cut off at max-output-tokens before its verdict, is retried once at low (at the same effort when it already is low)."
+    description: "Backend openai (or fallback-backend openai): sent as top-level `reasoning_effort` (for example low, medium or high) when set; nothing otherwise. An answer that is empty, or cut off at max-output-tokens before its verdict, is retried once at low (at the same effort when it already is low)."
     default: ''
   openai-api-key:
-    description: "Backend openai: sent as `Authorization: Bearer` when set; no header otherwise."
+    description: "Backend openai (or fallback-backend openai): sent as `Authorization: Bearer` when set; no header otherwise."
     default: ''
   github-token:
     description: Token that reads the PR and writes its comment.
@@ -54,7 +57,7 @@ inputs:
     description: "'true' re-reviews a head commit that already has a review."
     default: 'false'
   mode:
-    description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict or a review without a verdict line. The override label lets either mode through."
+    description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict or a review without a verdict line. The override label lets either mode through. A failure without a usable review is titled `No review: <why>` (annotation, job summary, sticky comment, and the check run itself when the workflow grants `checks: write`)."
     default: advisory
   override-label:
     description: PR label that lets the job pass in modes `complete` and `pass` whatever the review says.

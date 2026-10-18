@@ -11,16 +11,30 @@ export function setOutput(name: string, value: string): void {
   if (file) appendFileSync(file, `${name}=${value}\n`);
 }
 
+/** Appends Markdown to the job summary on the run's page. */
+export function summary(markdown: string): void {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (file) appendFileSync(file, `${markdown}\n`);
+}
+
+/** `title` heads the annotation in the PR's checks tab and on the run's page. */
+const annotate = (kind: string) => (m: string, title?: string) =>
+  console.log(`::${kind}${title ? ` title=${escapeProperty(title)}` : ""}::${escape(m)}`);
+
 export const log = {
   info: (m: string) => console.log(m),
-  notice: (m: string) => console.log(`::notice::${escape(m)}`),
-  warning: (m: string) => console.log(`::warning::${escape(m)}`),
-  error: (m: string) => console.log(`::error::${escape(m)}`),
+  notice: annotate("notice"),
+  warning: annotate("warning"),
+  error: annotate("error"),
   mask: (secret: string) => console.log(`::add-mask::${secret}`),
 };
 
 function escape(m: string): string {
   return m.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+function escapeProperty(m: string): string {
+  return escape(m).replace(/:/g, "%3A").replace(/,/g, "%2C");
 }
 
 export class GitHub {

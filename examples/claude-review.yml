@@ -23,6 +23,8 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  # Puts "No review: <why>" on the check itself, where the PR's checks list shows it.
+  checks: write
 
 jobs:
   review:
@@ -44,3 +46,8 @@ jobs:
           force: ${{ inputs.force || false }}
           mode: pass
           max-wait-minutes: 45
+          # When every key is out of credit or the API stays rate-limited, review through an
+          # OpenAI-compatible endpoint instead (see the README, "Fallback backend"):
+          # fallback-backend: openai
+          # openai-base-url: http://<model-server>:8000/v1
+          # openai-model: <model>

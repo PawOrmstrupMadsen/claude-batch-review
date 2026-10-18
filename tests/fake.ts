@@ -41,7 +41,11 @@ export class World {
   failingPaths = new Set<string>();
   batches: FakeBatch[] = [];
   /** Per API key: how batch creation answers. */
-  keys: Record<string, "ok" | "billing" | "auth"> = {};
+  keys: Record<string, "ok" | "billing" | "auth" | "credit" | "spend-limit" | "spend-cap" | "rate-limit" | "overloaded" | "bad-request"> = {};
+  /** Batch creation requests per key, retries included. */
+  creates: Record<string, number> = {};
+  /** This commit's check runs, as the Checks API lists them. */
+  checkRuns: { id: number; head_sha: string; status: string; details_url: string; output?: Json }[] = [];
   /** Polls before a batch ends. */
   pollsToEnd = 1;
   /** The batch result for a request; defaults to a passing review. */
@@ -75,8 +79,18 @@ export class World {
     const p = url.pathname;
     if (method === "POST" && p === "/v1/messages/batches") {
       const mode = this.keys[key] ?? "ok";
+      this.creates[key] = (this.creates[key] ?? 0) + 1;
       if (mode === "billing") return error(402, "billing_error", "Your credit balance is too low to access the Anthropic API.");
       if (mode === "auth") return error(401, "authentication_error", "invalid x-api-key");
+      if (mode === "credit") return error(400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.");
+      if (mode === "spend-limit")
+        return error(400, "invalid_request_error", "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.");
+      // No retry-after: the SDK backs off for seconds; x-should-retry keeps the test fast.
+      if (mode === "spend-cap")
+        return error(429, "rate_limit_error", "You have reached your API usage limits: your organization has crossed its monthly API usage threshold.", { "x-should-retry": "false" });
+      if (mode === "rate-limit") return error(429, "rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", { "retry-after-ms": "1" });
+      if (mode === "overloaded") return error(529, "overloaded_error", "Overloaded", { "retry-after-ms": "1" });
+      if (mode === "bad-request") return error(400, "invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum");
       const req = (body!.requests as Json[])[0];
       const params = req.params as Json;
       const b: FakeBatch = { id: `msgbatch_${this.batches.length + 1}`, key, model: String(params.model), polls: 0, ended: false, canceled: false, params };
@@ -125,6 +139,18 @@ export class World {
       return content === undefined ? new Response("Not Found", { status: 404 }) : new Response(content, { status: 200 });
     }
     if (method === "GET" && p === "/issues/1/comments") return json(this.comments);
+    m = /^\/commits\/([^/]+)\/check-runs$/.exec(p);
+    if (method === "GET" && m) {
+      const status = url.searchParams.get("status");
+      return json({ check_runs: this.checkRuns.filter((c) => c.head_sha === m![1] && (!status || c.status === status)) });
+    }
+    m = /^\/check-runs\/(\d+)$/.exec(p);
+    if (method === "PATCH" && m) {
+      const c = this.checkRuns.find((x) => x.id === Number(m![1]));
+      if (!c) return new Response("Not Found", { status: 404 });
+      c.output = body!.output as Json;
+      return json(c);
+    }
     if (method === "POST" && p === "/issues/1/comments") {
       const c = { id: this.comments.length + 100, body: String(body!.body), user: { login: "github-actions[bot]" } };
       this.comments.push(c);
@@ -196,8 +222,8 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-function error(status: number, type: string, message: string): Response {
-  return json({ type: "error", error: { type, message } }, status);
+function error(status: number, type: string, message: string, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify({ type: "error", error: { type, message } }), { status, headers: { "content-type": "application/json", ...headers } });
 }
 
 /** Sets the action's inputs and runtime files; returns a reader for the step outputs. */
@@ -208,17 +234,27 @@ export function actionEnv(inputs: Record<string, string>, event: Json = { action
   for (const [k, v] of Object.entries(all)) process.env[`INPUT_${k.toUpperCase()}`] = v;
   writeFileSync(join(dir, "event.json"), JSON.stringify(event));
   writeFileSync(join(dir, "output"), "");
+  writeFileSync(join(dir, "summary"), "");
   process.env.GITHUB_EVENT_PATH = join(dir, "event.json");
+  process.env.GITHUB_STEP_SUMMARY = join(dir, "summary");
+  process.env.GITHUB_RUN_ID = "77";
   process.env.GITHUB_EVENT_NAME = "pull_request";
   process.env.GITHUB_OUTPUT = join(dir, "output");
   process.env.GITHUB_API_URL = "https://api.github.test";
-  return () =>
+  const outputs = () =>
     Object.fromEntries(
       readFileSync(join(dir, "output"), "utf8")
         .split("\n")
         .filter(Boolean)
         .map((l) => l.split(/=(.*)/s).slice(0, 2) as [string, string]),
     );
+  return Object.assign(outputs, { summary: () => readFileSync(join(dir, "summary"), "utf8") });
+}
+
+/** The job's own in-progress check run, as GitHub Actions creates it. */
+export function jobCheck(w: World, id = 900): void {
+  w.checkRuns.push({ id, head_sha: w.pr.head.sha, status: "in_progress", details_url: `https://github.com/o/r/actions/runs/77/job/${id}` });
+  w.checkRuns.push({ id: id + 1, head_sha: w.pr.head.sha, status: "in_progress", details_url: `https://github.com/o/r/actions/runs/78/job/${id + 1}` });
 }
 
 export const noSleep = async () => {};
