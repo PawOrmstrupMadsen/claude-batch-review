@@ -89,7 +89,7 @@ describe("backend openai", () => {
     const out = actionEnv(openai());
     assert.equal(await run(w), 1);
     assert.equal(state(w)?.status, "failed");
-    assert.match(w.comment, /No review: the prompt does not fit the model's context .*Lower `max-input-tokens`/);
+    assert.match(w.comment, /### ⚠️ No review: the prompt is too large for the model\n\nThe prompt does not fit the model's context .*Lower `max-input-tokens`/);
     assert.equal(out().status, "failed");
   });
 
@@ -98,7 +98,7 @@ describe("backend openai", () => {
     w.chat = () => new TimeoutError("no answer within 30 min");
     actionEnv(openai());
     assert.equal(await run(w), 1);
-    assert.match(w.comment, /No review: the model gave no answer within 30 min/);
+    assert.match(w.comment, /### ⚠️ No review: the model gave no answer\n\nThe model gave no answer within 30 min/);
     assert.equal(w.chats.length, 1, "a timeout is not retried");
   });
 
@@ -114,7 +114,7 @@ describe("backend openai", () => {
     actionEnv(openai());
     assert.equal(await run(down), 1);
     assert.equal(down.chats.length, 3);
-    assert.match(down.comment, /could not reach the endpoint: `ECONNREFUSED connect`/);
+    assert.match(down.comment, /No review: the model server is unreachable\n\nCould not reach the endpoint: `ECONNREFUSED connect`/);
   });
 
   it("reuses a stored review and never asks on a label event", async () => {

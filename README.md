@@ -16,6 +16,13 @@ The `mode` input decides whether it can block a merge:
 
 In `complete` and `pass`, the PR label named by `override-label` (`review-override`) lets any of these through.
 
+Without a usable review (no answer, an empty answer, no verdict line, no credit, a batch still running), the
+failure reads as one line, for example `No review: out of API credit`, `No review: the model gave an empty
+answer` or `No review: batch still running after 45 min`, followed by the way out: re-run the job (with
+*force* for a commit that already has an answer), or add the override label, named as configured. The line
+heads the error annotation, the job summary and the sticky comment, and becomes the title of the job's own
+check run when the workflow grants `checks: write` (the example does), so the PR's checks list shows it.
+
 The example workflow uses `pass` and names the job **Claude review**; add that name as a required status
 check in the repo's ruleset to make it a merge gate. The verdict is stored with the review, so re-running
 the job, or adding or removing the override label (the workflow triggers on `labeled`/`unlabeled`), gives the
@@ -36,8 +43,8 @@ To redo a commit that already has a review: Actions → Claude review → Run wo
 A PR opened before the workflow existed has no **Claude review** check, so a required check blocks it. Close and
 reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the workflow on the PR.
 
-Inputs (`with:`): `backend` (`anthropic`), `api-keys` (backend `anthropic`), `openai-base-url`, `openai-model`,
-`openai-reasoning-effort`, `openai-api-key` (backend `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
+Inputs (`with:`): `backend` (`anthropic`), `api-keys` (backend `anthropic`), `fallback-backend` (empty),
+`openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key` (backend or fallback `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
 `max-wait-minutes` (`20`; `30` for `openai`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
 `pr`, `github-token`, `comment-author`. Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
@@ -77,6 +84,42 @@ example a self-hosted model server, when the Anthropic keys are out of credit or
   scrubbed from any server error quoted in the comment. Fork PRs are skipped, as with the Anthropic backend
   (where they get no secrets): their token cannot write the comment.
 
+## Fallback backend
+
+`fallback-backend: openai` keeps a required check from blocking every merge while the Anthropic account
+cannot serve: the same run reviews through the `openai-*` inputs instead.
+
+```yaml
+          api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
+          fallback-backend: openai
+          openai-base-url: http://<model-server>:8000/v1
+          openai-model: <model>
+```
+
+What falls back, after the key rotation and the SDK's own 4 retries:
+
+| Anthropic API answer | Falls back | Why |
+|---|---|---|
+| 400 `invalid_request_error` "Your credit balance is too low", 402 `billing_error` | when every key answers so | no credit; re-running does not help |
+| 400 `invalid_request_error` "You have reached your specified (workspace) API usage limits" | when every key answers so | a spend limit set in the Console, until it resets |
+| 429 `rate_limit_error` "You have reached your API usage limits" (no `retry-after`) | when every key answers so | the tier's monthly spend cap, until the month ends |
+| 401 `authentication_error`, 403 `permission_error` | when every key answers so | a revoked or restricted key |
+| 429 `rate_limit_error` (a rate limit) | after the remaining keys | rate limits are per organisation, and another key may belong to another one |
+| 529 `overloaded_error`, other 5xx, no connection | yes | still failing after the retries; the review would otherwise wait for a manual re-run |
+| other 4xx (a request the API rejects) | no | the request itself is wrong: a fallback would hide the bug, and the job fails as before |
+| batch request `errored` for lack of credit on every key | yes | as for credit above |
+| a refusal whose retry on `fallback-model` finds no key with credit | yes | as for credit above |
+
+The comment then reads `## Review · <model>` with a line saying it is a fallback review and why, the
+footer says `fallback from the Anthropic API`, the job summary names the backend, and the check run's title
+(with `checks: write`) reads `Review: ✅ Looks good (fallback: <model>)`, so a gate that reads the check
+sees it too. A fallback that fails
+too ends as no review (`No review: the model gave no answer`, …). Fork PRs never fall back, as the
+`openai` backend skips them. Without `fallback-backend` nothing changes. The fallback waits up to
+`max-wait-minutes` of its own (default 30) after whatever the batch took, so one job can wait up to
+2 × `max-wait-minutes`: with a fallback, set `timeout-minutes` above that (the example's 45 minutes need
+`timeout-minutes: 100`).
+
 ## Releases and pinning
 
 Callers pin a release by commit SHA: `uses: PawOrmstrupMadsen/claude-batch-review@<sha> # vX.Y.Z`. A merge to
@@ -98,8 +141,8 @@ re-pins everything to an existing release.
 ## Keys
 
 `ANTHROPIC_REVIEW_KEYS` holds one Anthropic API key per line; `#` lines are ignored. The action tries them
-in order: a key that answers with `billing_error` (no credit), `authentication_error` or
-`permission_error` is skipped, and a batch whose request fails for lack of credit is resubmitted on the
+in order: a key that answers with `billing_error` (no credit), an empty balance, a spend limit or spend cap,
+`authentication_error` or `permission_error` is skipped, and a batch whose request fails for lack of credit is resubmitted on the
 next key. Put the key you want drained first at the top. When every key is empty, the comment says so.
 
 The list lives in `~/.config/claude-review/keys` on the desktop (mode 600). After adding or removing a

@@ -21104,15 +21104,24 @@ function setOutput(name, value) {
   if (file) appendFileSync(file, `${name}=${value}
 `);
 }
+function summary(markdown) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (file) appendFileSync(file, `${markdown}
+`);
+}
+var annotate = (kind) => (m, title) => console.log(`::${kind}${title ? ` title=${escapeProperty(title)}` : ""}::${escape2(m)}`);
 var log = {
   info: (m) => console.log(m),
-  notice: (m) => console.log(`::notice::${escape2(m)}`),
-  warning: (m) => console.log(`::warning::${escape2(m)}`),
-  error: (m) => console.log(`::error::${escape2(m)}`),
+  notice: annotate("notice"),
+  warning: annotate("warning"),
+  error: annotate("error"),
   mask: (secret) => console.log(`::add-mask::${secret}`)
 };
 function escape2(m) {
   return m.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+function escapeProperty(m) {
+  return escape2(m).replace(/:/g, "%3A").replace(/,/g, "%2C");
 }
 var GitHub = class {
   constructor(token, owner, repo, fetchImpl = fetch) {
@@ -21201,7 +21210,7 @@ var RETRY_MS = 3e4;
 async function chatReview(post, sleep2, r) {
   const scrub = (s) => r.apiKey ? s.split(r.apiKey).join("***") : s;
   const result = await ask(post, sleep2, r);
-  return result.ok ? result : { ok: false, why: scrub(result.why) };
+  return result.ok ? result : { ...result, why: scrub(result.why) };
 }
 async function ask(post, sleep2, r) {
   const url = `${r.baseUrl.replace(/\/+$/, "")}/chat/completions`;
@@ -21224,13 +21233,13 @@ async function ask(post, sleep2, r) {
     try {
       res = await post(url, headers, body, Math.max(1, deadline - Date.now()));
     } catch (e) {
-      if (e instanceof TimeoutError) return { ok: false, why: `the model gave ${e.message}.` };
+      if (e instanceof TimeoutError) return { ok: false, why: `the model gave ${e.message}.`, reason: "the model gave no answer" };
       const why = `could not reach the endpoint: \`${errorText2(e)}\`.`;
       if (attempt < RETRIES && deadline - Date.now() > RETRY_MS) {
         await sleep2(RETRY_MS);
         continue;
       }
-      return { ok: false, why };
+      return { ok: false, why, reason: "the model server is unreachable" };
     }
     if (res.status >= 200 && res.status < 300) return parseCompletion(res.text, r.model, Date.now() - start);
     const msg = errorMessage(res.text);
@@ -21239,8 +21248,8 @@ async function ask(post, sleep2, r) {
       continue;
     }
     if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
-      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.` };
-    return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}` };
+      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.`, reason: "the prompt is too large for the model" };
+    return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}`, reason: `the model server answered HTTP ${res.status}` };
   }
 }
 function parseCompletion(text, requested, ms) {
@@ -21248,10 +21257,10 @@ function parseCompletion(text, requested, ms) {
   try {
     c = JSON.parse(text);
   } catch {
-    return { ok: false, why: `the endpoint answered with something other than JSON: \`${text.slice(0, 200)}\`` };
+    return { ok: false, why: `the endpoint answered with something other than JSON: \`${text.slice(0, 200)}\``, reason: "the model gave no usable answer" };
   }
   const choice = c.choices?.[0];
-  if (!choice) return { ok: false, why: "the endpoint answered without a choice." };
+  if (!choice) return { ok: false, why: "the endpoint answered without a choice.", reason: "the model gave no usable answer" };
   const content = choice.message?.content;
   const raw = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "";
   return {
@@ -21335,7 +21344,7 @@ var PRICES = {
   "claude-sonnet-5-5": [2, 10],
   "claude-haiku-5-5": [0.1, 0.5]
 };
-async function run({ overrideLabel, backend, event }, deps) {
+async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   const sleep2 = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const keys = input("api-keys").split(/\r?\n/).map((k) => k.trim()).filter((k) => k && !k.startsWith("#"));
   keys.forEach(log.mask);
@@ -21350,8 +21359,9 @@ async function run({ overrideLabel, backend, event }, deps) {
   if (!prNumber) throw new Error("No pull request number: pass the `pr` input.");
   const pr = await gh.json(`/repos/${owner}/${repo}/pulls/${prNumber}`);
   const openai = backend === "openai";
+  const openaiModel = input("openai-model");
   const cfg = {
-    model: openai ? input("openai-model") : input("model", "claude-opus-5-5"),
+    model: openai ? openaiModel : input("model", "claude-opus-5-5"),
     fallbackModel: input("fallback-model", "claude-opus-4-8"),
     effort: input("effort", "high"),
     maxOutputTokens: num("max-output-tokens", 32e3),
@@ -21362,33 +21372,46 @@ async function run({ overrideLabel, backend, event }, deps) {
     force: input("force") === "true"
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
+  const sha = pr.head.sha;
   const openaiKey = input("openai-api-key");
   if (openaiKey) log.mask(openaiKey);
   const baseUrl = input("openai-base-url");
-  if (openai && (!baseUrl || !cfg.model)) throw new Error("backend openai needs the `openai-base-url` and `openai-model` inputs.");
-  if (openai && openaiKey && !baseUrl.startsWith("https:"))
+  const usesOpenAI = openai || !!fallback;
+  if (usesOpenAI && (!baseUrl || !openaiModel))
+    throw new Error(`${openai ? "backend" : "fallback-backend"} openai needs the \`openai-base-url\` and \`openai-model\` inputs.`);
+  if (usesOpenAI && openaiKey && !baseUrl.startsWith("https:"))
     log.warning("openai-api-key goes to a plain-HTTP endpoint: keep that endpoint on a private network.");
-  if (openai && pr.head.repo?.full_name !== pr.base.repo?.full_name) {
+  const fork = pr.head.repo?.full_name !== pr.base.repo?.full_name;
+  if (openai && fork) {
     log.notice("Fork pull request: the openai backend skips it.");
-    return { status: "skipped", overridden };
+    return { status: "skipped", overridden, sha, reason: "the openai backend skips fork pull requests", next: "" };
   }
   if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
-    return { status: "skipped", overridden };
+    return { status: "skipped", overridden, sha, reason: "no API keys", next: "Set the `api-keys` input, then re-run this job." };
   }
-  const sha7 = pr.head.sha.slice(0, 7);
+  const canFallBack = fallback === "openai" && !fork;
+  const sha7 = sha.slice(0, 7);
   let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
   const prior = comment ? parseState(comment.body) : null;
   let job = null;
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
     log.notice(`PR #${prNumber} @ ${sha7} already has a review; dispatch with force=true to redo it.`);
-    return { status: "done", verdict: prior.verdict ?? parseVerdict(comment?.body ?? ""), overridden };
+    const verdict = prior.verdict ?? parseVerdict(comment?.body ?? "");
+    return { status: "done", verdict, overridden, sha, ...verdict === "unknown" ? { reason: NO_VERDICT } : {}, note: `Stored review of ${sha7}.` };
   }
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
   const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
   if (labelEvent && (overridden || !resumable)) {
     log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
-    return { status: prior?.sha === pr.head.sha && prior.status === "failed" ? "failed" : "pending", overridden };
+    const failed = prior?.sha === pr.head.sha && prior.status === "failed";
+    return {
+      status: failed ? "failed" : "pending",
+      overridden,
+      sha,
+      reason: failed ? "the last attempt failed" : `${sha7} has none yet`,
+      next: "Re-run the review job for the last push."
+    };
   }
   if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
@@ -21418,6 +21441,7 @@ async function run({ overrideLabel, backend, event }, deps) {
       ],
       messages: [{ role: "user", content: c.text }]
     };
+    let down = null;
     for (let i = from; i < slots.length; i++) {
       try {
         const batch = await slots[i].client.messages.batches.create({
@@ -21426,10 +21450,21 @@ async function run({ overrideLabel, backend, event }, deps) {
         log.info(`Submitted ${batch.id} on key ${i + 1}/${slots.length} (${model}).`);
         return { batch: batch.id, slot: i, model, submitted: batch.created_at };
       } catch (e) {
-        if (!(e instanceof Anthropic.APIError) || !keyUnusable(e.status, e.type, e.message)) throw e;
-        log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} \u2014 ${e.message}`);
+        if (e instanceof Anthropic.APIError && keyUnusable(e.status, e.type, e.message)) {
+          log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} \u2014 ${e.message}`);
+          continue;
+        }
+        const why = canFallBack ? apiDown(e) : null;
+        if (!why) throw e;
+        down = new AnthropicDown(why, e instanceof Error ? e.message : String(e));
+        if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
+          log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
+          continue;
+        }
+        throw down;
       }
     }
+    if (down) throw down;
     return null;
   };
   const upsert = async (state, body) => {
@@ -21447,30 +21482,48 @@ async function run({ overrideLabel, backend, event }, deps) {
       comment = await gh.json(`${base}/${prNumber}/comments`, { method: "POST", body: JSON.stringify({ body: full }) });
     }
   };
-  const header = (model) => `## ${openai ? "Review" : "Claude review"} \xB7 \`${model}\` \xB7 ${sha7}
+  const header = (model, local = openai) => `## ${local ? "Review" : "Claude review"} \xB7 \`${model}\` \xB7 ${sha7}
 
 `;
+  const wayOut = (next, blocks) => blocks ? `${next} To merge anyway, add the \`${overrideLabel}\` label.` : next;
+  const noReview = (reason, next, blocks, detail = "") => [`### \u26A0\uFE0F No review: ${reason}`, detail, wayOut(next, blocks)].filter(Boolean).join("\n\n");
   const queue = async (j) => upsert(
-    { status: "pending", sha: pr.head.sha, batch: j.batch, key: slots[j.slot].fp, model: j.model, submitted: j.submitted },
+    { status: "pending", sha, batch: j.batch, key: slots[j.slot].fp, model: j.model, submitted: j.submitted },
     `${header(j.model)}\u23F3 Queued in batch \`${j.batch}\` (key ${j.slot + 1}/${slots.length}). This comment becomes the review when the batch ends. If the workflow times out first, re-run it to collect the result.`
   );
-  const fail = async (model, why) => {
-    await upsert({ status: "failed", sha: pr.head.sha }, `${header(model)}\u26A0\uFE0F No review: ${why}`);
+  const fail = async (model, why, reason, next = RETRY, local = openai) => {
+    await upsert({ status: "failed", sha }, `${header(model, local)}${noReview(reason, next, mode !== "advisory", capitalise(why))}`);
     log.warning(why);
-    return { status: "failed", overridden };
+    return { status: "failed", overridden, sha, reason, next };
   };
-  const reviewOpenAI = async () => {
+  const unusable = (text, verdict) => {
+    if (verdict !== "unknown") return { reason: void 0, head: "" };
+    const reason = text ? NO_VERDICT : EMPTY_ANSWER;
+    return { reason, head: `${noReview(reason, FORCE, mode === "pass")}
+
+---
+
+` };
+  };
+  const reviewOpenAI = async (because = "") => {
+    running = { model: openaiModel, local: true };
     const c = await context();
+    if (because) log.warning(`Falling back to the openai backend: ${because}.`);
+    const via = because ? `> \u21AA\uFE0F Fallback review: ${because}, so \`${openaiModel}\` reviewed this instead of Claude.
+
+` : "";
+    const after = because ? ` (in the fallback review: ${because})` : "";
     await upsert(
-      { status: "pending", sha: pr.head.sha, model: cfg.model },
-      `${header(cfg.model)}\u23F3 Reviewing with \`${cfg.model}\`. This comment becomes the review when the model answers.`
+      { status: "pending", sha, model: openaiModel },
+      `${header(openaiModel, true)}${via}\u23F3 Reviewing with \`${openaiModel}\`. This comment becomes the review when the model answers.`
     );
-    log.info(`Asking ${cfg.model} at ${baseUrl} (waits up to ${cfg.maxWaitMs / 6e4} min).`);
-    const deadline = Date.now() + cfg.maxWaitMs;
+    const waitMs = num("max-wait-minutes", 30) * 6e4;
+    log.info(`Asking ${openaiModel} at ${baseUrl} (waits up to ${waitMs / 6e4} min).`);
+    const deadline = Date.now() + waitMs;
     const ask2 = (reasoningEffort) => chatReview(deps.post ?? httpPost, sleep2, {
       baseUrl,
       apiKey: openaiKey,
-      model: cfg.model,
+      model: openaiModel,
       maxTokens: cfg.maxOutputTokens,
       reasoningEffort,
       timeoutMs: Math.max(1, deadline - Date.now()),
@@ -21480,34 +21533,42 @@ ${c.guidance || "(The repository has no guidance files.)"}`,
       user: c.text
     });
     let r = await ask2(cfg.reasoningEffort);
-    if (!r.ok) return fail(cfg.model, r.why);
+    if (!r.ok) return fail(openaiModel, r.why + after, r.reason, RETRY, true);
     let a = r.answer;
     let retried = "";
     if (thoughtOut(a) && deadline - Date.now() > MIN_RETRY_MS) {
       const effort = RETRY_EFFORT;
       const first = a;
-      log.warning(`${cfg.model} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
+      log.warning(`${openaiModel} gave ${a.text ? "no verdict before max-output-tokens" : "an empty answer"}; retrying at reasoning effort ${effort}.`);
       r = await ask2(effort);
-      if (!r.ok) return fail(cfg.model, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})`);
+      if (!r.ok)
+        return fail(openaiModel, `${r.why} (on a retry after ${first.text ? "an answer cut off before its verdict" : "an empty answer"})${after}`, r.reason, RETRY, true);
       a = { ...r.answer, ms: first.ms + r.answer.ms, inputTokens: first.inputTokens + r.answer.inputTokens, outputTokens: first.outputTokens + r.answer.outputTokens };
       retried = ` \xB7 retried at reasoning effort ${effort} after ${first.text ? "an answer cut off before its verdict" : "an empty answer"}`;
     }
     const truncated = a.truncated ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
     const verdict = parseVerdict(a.text);
+    const bad = unusable(a.text, verdict);
     await upsert(
-      { status: "done", verdict, sha: pr.head.sha, model: a.model },
-      `${header(a.model)}${a.text || "_Empty response._"}${truncated}
+      { status: "done", verdict, sha, model: a.model },
+      `${header(a.model, true)}${via}${bad.head}${a.text || "_Empty response._"}${truncated}
 
-${openaiFooter(a, c, retried)}`
+${openaiFooter(a, c, retried + (because ? " \xB7 fallback from the Anthropic API" : ""))}`
     );
     log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
-    return { status: "done", verdict, overridden };
+    const note = `Reviewed by \`${a.model}\` through the OpenAI-compatible API${because ? `, the fallback backend: ${because}` : ""}.`;
+    return { status: "done", verdict, overridden, sha, reason: bad.reason, note, ...because ? { fallbackModel: a.model } : {} };
   };
-  const review = async () => {
-    if (openai) return reviewOpenAI();
+  const keysWhy = `none of the ${slots.length} API keys can be used (out of credit, at a spend limit, or refused).`;
+  const outOfCredit = (model, why) => {
+    job = null;
+    return canFallBack ? reviewOpenAI("no Anthropic API key can be used (out of credit, at a spend limit, or refused)") : fail(model, why, OUT_OF_CREDIT, "Add credit or a key to `ANTHROPIC_REVIEW_KEYS`, then re-run this job.");
+  };
+  let running = { model: cfg.model, local: openai };
+  const reviewAnthropic = async () => {
     if (!job) {
       job = await submit(0, cfg.model);
-      if (!job) return fail(cfg.model, `none of the ${slots.length} API keys has credit left. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
+      if (!job) return outOfCredit(cfg.model, keysWhy);
       await queue(job);
     }
     const deadline = Date.now() + cfg.maxWaitMs;
@@ -21516,47 +21577,60 @@ ${openaiFooter(a, c, retried)}`
       const batch = await waitForBatch(client, job.batch, deadline, sleep2);
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 6e4} min; re-run the workflow to collect it.`);
-        return { status: "pending", overridden };
+        return { status: "pending", overridden, sha, reason: `batch still running after ${cfg.maxWaitMs / 6e4} min`, next: "Re-run this job to collect it." };
       }
       let result = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
-      if (!result) return fail(job.model, `batch \`${job.batch}\` ended without a result.`);
+      if (!result) return fail(job.model, `batch \`${job.batch}\` ended without a result.`, "the batch ended without a result");
       if (result.type === "succeeded") {
         const msg = result.message;
         if (msg.stop_reason === "refusal" && job.model !== cfg.fallbackModel) {
           log.warning(`${job.model} declined (${msg.stop_details?.category ?? "no category"}); retrying on ${cfg.fallbackModel}.`);
           const next = await submit(job.slot, cfg.fallbackModel);
-          if (!next) return fail(job.model, "the model declined and no key had credit for the fallback model.");
+          if (!next) return outOfCredit(job.model, "the model declined and no key had credit for the fallback model.");
           await queue(job = next);
           continue;
         }
-        if (msg.stop_reason === "refusal") return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`);
+        if (msg.stop_reason === "refusal")
+          return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`, "the model declined to review this PR");
         const text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n\n").trim();
         const truncated = msg.stop_reason === "max_tokens" ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
         const verdict = parseVerdict(text);
+        const bad = unusable(text, verdict);
         await upsert(
-          { status: "done", verdict, sha: pr.head.sha, model: msg.model },
-          `${header(msg.model)}${text || "_Empty response._"}${truncated}
+          { status: "done", verdict, sha, model: msg.model },
+          `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}
 
 ${footer(msg, job, batch, slots.length, await context())}`
         );
         log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
-        return { status: "done", verdict, overridden };
+        return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the Message Batches API.` };
       }
       if (result.type === "errored") {
         const err = result.error.error;
         if (keyUnusable(void 0, err.type, err.message)) {
           log.warning(`Key ${job.slot + 1}/${slots.length} ran out during the batch: ${err.message}`);
           const next = await submit(job.slot + 1, job.model);
-          if (!next) return fail(job.model, `every API key is out of credit. Add a key to \`ANTHROPIC_REVIEW_KEYS\`.`);
+          if (!next) return outOfCredit(job.model, "every API key is out of credit.");
           await queue(job = next);
           continue;
         }
-        return fail(job.model, `the batch request failed: \`${err.type}\` ${err.message}`);
+        return fail(job.model, `the batch request failed: \`${err.type}\` ${err.message}`, "the batch request failed");
       }
-      return fail(job.model, `batch \`${job.batch}\` ended as \`${result.type}\`. Re-run the workflow to try again.`);
+      return fail(job.model, `batch \`${job.batch}\` ended as \`${result.type}\`. Re-run the workflow to try again.`, `the batch ended as ${result.type}`);
     }
-    return fail(job.model, "gave up after too many resubmissions.");
+    return fail(job.model, "gave up after too many resubmissions.", "too many resubmissions");
+  };
+  const review = async () => {
+    if (openai) return reviewOpenAI();
+    try {
+      return await reviewAnthropic();
+    } catch (e) {
+      if (!(e instanceof AnthropicDown)) throw e;
+      log.warning(`${e.reason}: ${e.message}`);
+      job = null;
+      return reviewOpenAI(e.reason);
+    }
   };
   try {
     return await review();
@@ -21564,14 +21638,39 @@ ${footer(msg, job, batch, slots.length, await context())}`
     const why = e instanceof Error ? e.message : String(e);
     if (job)
       await upsert(
-        { status: "pending", sha: pr.head.sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted },
+        { status: "pending", sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted },
         `${header(job.model)}\u23F3 Batch \`${job.batch}\` is queued, but the job hit an error (\`${why.slice(0, 300)}\`). Re-run the workflow to collect the result.`
       ).catch(() => {
       });
-    else await fail(cfg.model, `the job hit an error: \`${why.slice(0, 300)}\``).catch(() => {
+    else await fail(running.model, `the job hit an error: \`${why.slice(0, 300)}\``, crashReason(e), RETRY, running.local).catch(() => {
     });
     throw e;
   }
+}
+var RETRY = "Re-run this job to try again.";
+var FORCE = "Re-run with force to redo it.";
+var OUT_OF_CREDIT = "out of API credit";
+var EMPTY_ANSWER = "the model gave an empty answer";
+var NO_VERDICT = "the answer has no verdict line";
+var AnthropicDown = class extends Error {
+  constructor(reason, detail) {
+    super(detail);
+    this.reason = reason;
+  }
+  reason;
+};
+function apiDown(e) {
+  if (e instanceof Anthropic.APIConnectionError) return "the Anthropic API is unreachable";
+  if (!(e instanceof Anthropic.APIError) || e.status === void 0) return null;
+  if (e.status === 429) return "the Anthropic API is rate-limited";
+  if (e.status === 529) return "the Anthropic API is overloaded";
+  return e.status >= 500 ? `the Anthropic API failed (HTTP ${e.status})` : null;
+}
+function crashReason(e) {
+  return apiDown(e) ?? "the job hit an error";
+}
+function capitalise(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 function parseVerdict(text) {
   const m = /\*\*Verdict:\*\*\s*(✅|⚠\uFE0F?|❌)/u.exec(text);
@@ -21586,7 +21685,7 @@ function num(name, fallback) {
 function keyUnusable(status, type, message) {
   if (status === 401 || status === 402 || status === 403) return true;
   if (type === "billing_error" || type === "authentication_error" || type === "permission_error") return true;
-  return /credit balance/i.test(message);
+  return /credit balance|API usage limits/i.test(message);
 }
 async function waitForBatch(client, id, deadline, sleep2) {
   for (let i = 0; ; i++) {
@@ -21649,17 +21748,46 @@ function readEvent() {
     return {};
   }
 }
-function blocker(mode, { status, verdict }) {
+var VERDICT_NAMES = { pass: "\u2705 Looks good", minor: "\u26A0\uFE0F Minor issues", changes: "\u274C Changes needed", unknown: "no verdict" };
+function headline(o, mode = "pass") {
+  if (o.status !== "done") return `No review: ${o.reason ?? (o.status === "pending" ? "the batch is still running" : `the review ${o.status}`)}`;
+  const via = o.fallbackModel ? ` (fallback: ${o.fallbackModel})` : "";
+  if ((!o.verdict || o.verdict === "unknown") && mode === "pass") return `No review: ${o.reason ?? NO_VERDICT}${via}`;
+  return `Review: ${VERDICT_NAMES[o.verdict ?? "unknown"]}${via}`;
+}
+function blocker(mode, o) {
   if (mode === "advisory") return null;
-  if (status !== "done") return `No review for this commit (${status}). Re-run this job to retry or collect a pending batch.`;
-  if (mode === "pass" && verdict === "changes") return "The review asks for changes. Fix them and push.";
-  if (mode === "pass" && verdict === "unknown") return "The review has no recognisable verdict line. Re-run with force to redo it.";
+  const title = headline(o, mode);
+  if (o.status !== "done") return { title, next: o.next ?? (o.status === "pending" ? "Re-run this job to collect the batch." : RETRY) };
+  if (mode === "pass" && o.verdict === "changes") return { title, next: "Fix the findings and push." };
+  if (mode === "pass" && o.verdict === "unknown") return { title, next: o.next ?? FORCE };
   return null;
+}
+async function titleCheck(deps, shas, title, text) {
+  const runId = process.env.GITHUB_RUN_ID;
+  const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
+  if (!runId || !owner || !repo) return;
+  const gh = new GitHub(input("github-token"), owner, repo, deps.fetch);
+  try {
+    for (const sha of new Set(shas.filter((s) => !!s))) {
+      const { check_runs } = await gh.json(
+        `/repos/${owner}/${repo}/commits/${sha}/check-runs?status=in_progress&per_page=100`
+      );
+      const mine = check_runs.filter((c) => c.details_url?.includes(`/actions/runs/${runId}/job/`));
+      if (mine.length !== 1) continue;
+      await gh.json(`/repos/${owner}/${repo}/check-runs/${mine[0].id}`, { method: "PATCH", body: JSON.stringify({ output: { title, summary: text } }) });
+      return;
+    }
+    log.info("Found no single check run of this job to title.");
+  } catch (e) {
+    log.info(`Could not title the check run (the workflow needs \`checks: write\`): ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`);
+  }
 }
 async function main(deps = {}) {
   const mode = input("mode", "advisory");
   const overrideLabel = input("override-label", "review-override");
   const backend = input("backend", "anthropic");
+  const fallback = input("fallback-backend");
   const event = readEvent();
   if (!["advisory", "complete", "pass"].includes(mode)) {
     log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
@@ -21669,27 +21797,49 @@ async function main(deps = {}) {
     log.error(`Input backend must be anthropic or openai, got "${backend}".`);
     return 1;
   }
+  if (fallback && (fallback !== "openai" || backend !== "anthropic")) {
+    log.error(`Input fallback-backend must be empty or openai, with backend anthropic; got "${fallback}" with backend ${backend}.`);
+    return 1;
+  }
+  const label = `To merge anyway, add the \`${overrideLabel}\` label.`;
+  const shas = [event.pull_request?.head?.sha, process.env.GITHUB_SHA];
   try {
-    const outcome = await run({ mode, overrideLabel, backend, event }, deps);
+    const outcome = await run({ mode, overrideLabel, backend, fallback, event }, deps);
     setOutput("status", outcome.status);
     setOutput("verdict", outcome.verdict ?? "");
-    const why = blocker(mode, outcome);
-    if (!why) return 0;
-    if (outcome.overridden) {
-      log.notice(`${why} The \`${overrideLabel}\` label overrides it.`);
+    const b = blocker(mode, outcome);
+    const title = headline(outcome, mode);
+    const overrides = `The \`${overrideLabel}\` label lets the pull request through.`;
+    const way = !b ? "" : outcome.overridden ? overrides : [b.next, label].filter(Boolean).join(" ");
+    summary(`### ${b && outcome.overridden ? `${title} (overridden by the label)` : title}
+
+${[way, outcome.note].filter(Boolean).join("\n\n")}`);
+    if (!b) {
+      if (outcome.fallbackModel) await titleCheck(deps, [outcome.sha, ...shas], title, outcome.note ?? "");
       return 0;
     }
-    log.error(`${why} To merge anyway, add the \`${overrideLabel}\` label.`);
+    if (outcome.overridden) {
+      log.notice(`${b.title}. The \`${overrideLabel}\` label overrides it.`, b.title);
+      await titleCheck(deps, [outcome.sha, ...shas], `${b.title} (overridden by the label)`, overrides);
+      return 0;
+    }
+    log.error(`${b.title}. ${way}`, b.title);
+    await titleCheck(deps, [outcome.sha, ...shas], b.title, way);
     return 1;
   } catch (e) {
     setOutput("status", "failed");
     const msg = e instanceof Error ? e.stack ?? e.message : String(e);
+    const title = `No review: ${crashReason(e)}`;
     if (mode !== "advisory" && (event.pull_request?.labels ?? []).some((l) => l.name === overrideLabel)) {
       log.notice(`${msg}
-The \`${overrideLabel}\` label overrides the failure.`);
+The \`${overrideLabel}\` label overrides the failure.`, title);
       return 0;
     }
-    log.error(msg);
+    summary(`### ${title}
+
+${RETRY} ${mode === "advisory" ? "" : label}`.trim());
+    log.error(msg, title);
+    if (mode !== "advisory") await titleCheck(deps, shas, title, `${RETRY} ${label}`);
     return 1;
   }
 }

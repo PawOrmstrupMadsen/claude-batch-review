@@ -60,7 +60,8 @@ export interface ChatAnswer {
   ms: number;
 }
 
-export type ChatResult = { ok: true; answer: ChatAnswer } | { ok: false; why: string };
+/** `reason` is the one-liner after "No review:"; `why` gives the detail. */
+export type ChatResult = { ok: true; answer: ChatAnswer } | { ok: false; why: string; reason: string };
 
 interface Completion {
   model?: string;
@@ -76,7 +77,7 @@ export async function chatReview(post: Post, sleep: (ms: number) => Promise<void
   // What the server says goes into the PR comment, which no log mask covers: never let it carry the key.
   const scrub = (s: string) => (r.apiKey ? s.split(r.apiKey).join("***") : s);
   const result = await ask(post, sleep, r);
-  return result.ok ? result : { ok: false, why: scrub(result.why) };
+  return result.ok ? result : { ...result, why: scrub(result.why) };
 }
 
 async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequest): Promise<ChatResult> {
@@ -101,13 +102,13 @@ async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequ
     try {
       res = await post(url, headers, body, Math.max(1, deadline - Date.now()));
     } catch (e) {
-      if (e instanceof TimeoutError) return { ok: false, why: `the model gave ${e.message}.` };
+      if (e instanceof TimeoutError) return { ok: false, why: `the model gave ${e.message}.`, reason: "the model gave no answer" };
       const why = `could not reach the endpoint: \`${errorText(e)}\`.`;
       if (attempt < RETRIES && deadline - Date.now() > RETRY_MS) {
         await sleep(RETRY_MS);
         continue;
       }
-      return { ok: false, why };
+      return { ok: false, why, reason: "the model server is unreachable" };
     }
     if (res.status >= 200 && res.status < 300) return parseCompletion(res.text, r.model, Date.now() - start);
     const msg = errorMessage(res.text);
@@ -116,8 +117,8 @@ async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequ
       continue;
     }
     if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
-      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.` };
-    return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}` };
+      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.`, reason: "the prompt is too large for the model" };
+    return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}`, reason: `the model server answered HTTP ${res.status}` };
   }
 }
 
@@ -126,10 +127,10 @@ function parseCompletion(text: string, requested: string, ms: number): ChatResul
   try {
     c = JSON.parse(text) as Completion;
   } catch {
-    return { ok: false, why: `the endpoint answered with something other than JSON: \`${text.slice(0, 200)}\`` };
+    return { ok: false, why: `the endpoint answered with something other than JSON: \`${text.slice(0, 200)}\``, reason: "the model gave no usable answer" };
   }
   const choice = c.choices?.[0];
-  if (!choice) return { ok: false, why: "the endpoint answered without a choice." };
+  if (!choice) return { ok: false, why: "the endpoint answered without a choice.", reason: "the model gave no usable answer" };
   const content = choice.message?.content;
   const raw = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "";
   return {

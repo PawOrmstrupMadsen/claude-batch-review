@@ -24,6 +24,8 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  # Puts "No review: <why>" on the check itself, where the PR's checks list shows it.
+  checks: write
 
 jobs:
   review:

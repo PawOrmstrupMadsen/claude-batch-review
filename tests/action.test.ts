@@ -102,7 +102,7 @@ describe("main", () => {
     const out = actionEnv({ "api-keys": "k1\nk2", mode: "pass" });
     assert.equal(await main({ fetch: w.fetch, sleep: noSleep }), 1);
     assert.equal(state(w)?.status, "failed");
-    assert.match(w.comment, /none of the 2 API keys/);
+    assert.match(w.comment, /### ⚠️ No review: out of API credit\n\nNone of the 2 API keys can be used/);
     assert.equal(out().status, "failed");
   });
 
