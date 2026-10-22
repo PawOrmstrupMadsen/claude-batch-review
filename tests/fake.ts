@@ -58,8 +58,8 @@ export class World {
   cancels: string[] = [];
   /** The sticky comment as each cancel request found it. */
   commentAtCancel: string[] = [];
-  /** A direct request's stream breaks off with this error event after it started. */
-  streamError = "";
+  /** Per API key: a direct request's stream breaks off with this error event after it started. */
+  streamErrors: Record<string, string> = {};
   /** Batch creation requests per key, retries included. */
   creates: Record<string, number> = {};
   /** This commit's check runs, as the Checks API lists them. */
@@ -97,7 +97,7 @@ export class World {
     const p = url.pathname;
     if (method === "POST" && p === "/v1/messages") {
       this.syncs.push({ key, params: body! });
-      return keyError(this.syncKeys[key] ?? "ok") ?? stream(this.syncResult(body!), this.streamError);
+      return keyError(this.syncKeys[key] ?? "ok") ?? stream(this.syncResult(body!), this.streamErrors[key]);
     }
     if (method === "POST" && p === "/v1/messages/batches") {
       const mode = this.keys[key] ?? "ok";

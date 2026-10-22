@@ -220,11 +220,36 @@ describe("sync-after-minutes", () => {
 
   it("hands the direct request to fallback-backend when the stream breaks off overloaded", async () => {
     const w = slow();
-    w.streamError = "overloaded_error";
+    w.streamErrors = { k1: "overloaded_error" };
     actionEnv(withFallback);
     assert.equal(await run(w), 0);
     assert.equal(w.chats.length, 1);
     assert.match(w.comment, /Fallback review: the Anthropic API is overloaded/);
+  });
+
+  it("moves the direct request to the next key when the stream breaks off rate-limited", async () => {
+    const w = slow();
+    w.streamErrors = { k1: "rate_limit_error" };
+    actionEnv({ "api-keys": "k1\nk2", mode: "pass", "max-wait-minutes": "45" });
+    assert.equal(await run(w), 0);
+    assert.deepEqual(w.syncs.map((s) => s.key), ["k1", "k2"]);
+    assert.equal(state(w)?.status, "done");
+  });
+
+  it("takes another run's direct review instead of going direct too", async () => {
+    const w = slow();
+    const t0 = now;
+    const posted = '<!-- claude-batch-review {"status":"done","verdict":"pass","sha":"head1","model":"claude-opus-5-5"} -->\n## Claude review';
+    actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
+    // Another run resumed the batch and went direct first; it posts its review a little later.
+    onSleep = () => {
+      w.comments[0].body =
+        now < t0 + 5.1 * MIN ? '<!-- claude-batch-review {"status":"pending","sha":"head1","model":"claude-opus-5-5"} -->\n## Claude review' : posted;
+    };
+    assert.equal(await run(w), 0);
+    assert.deepEqual(w.cancels, []);
+    assert.equal(w.syncs.length, 0);
+    assert.equal(w.comment, posted);
   });
 
   it("retries a refusal directly on the fallback model", async () => {

@@ -71,7 +71,8 @@ Messages API directly, streamed: one review at full price instead of a gate that
   otherwise cancels it and goes direct at once. With `max-wait-minutes` below `sync-after-minutes`, the wait
   runs out first and the next run goes direct.
 - A label-event run never goes direct: it waits for the batch, and when the review run canceled it, takes
-  that run's review from the comment instead of writing over it.
+  that run's review from the comment instead of writing over it. A run that reaches `sync-after-minutes`
+  after another run of the same commit went direct does the same, so one review is paid once.
 
 `sync-after-minutes: 0` waits for the batch for the whole of `max-wait-minutes`, as before. The direct
 request has no time limit of its own beyond the SDK's: allow for one long answer after `sync-after-minutes`

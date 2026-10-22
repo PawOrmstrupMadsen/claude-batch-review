@@ -223,7 +223,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
           continue;
         }
         // Rate limits are per organisation, and the next key may belong to another one.
-        if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
+        if (e instanceof Anthropic.APIError && rateLimited(e) && i + 1 < slots.length) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
           limited = e;
           continue;
@@ -463,6 +463,9 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       // Set when the batch ended while being canceled: only a succeeded result spares the direct request.
       let raced = false;
       if (!batch && syncAt <= deadline) {
+        // Another run for this commit went direct already: take its review instead of paying again.
+        const other = await reviewedElsewhere(job.batch, deadline);
+        if (other) return other;
         batch = await cancelSlow(job);
         if (!batch) return reviewSync(job);
         raced = true;
@@ -566,10 +569,21 @@ export function apiDown(e: unknown): string | null {
   if (!(e instanceof Anthropic.APIError)) return null;
   // An error event in the middle of a streamed answer carries no status, only its type.
   if (e.status === undefined)
-    return e.type === "overloaded_error" ? "the Anthropic API is overloaded" : e.type === "api_error" ? "the Anthropic API failed" : null;
+    return e.type === "overloaded_error"
+      ? "the Anthropic API is overloaded"
+      : e.type === "api_error"
+        ? "the Anthropic API failed"
+        : e.type === "rate_limit_error"
+          ? "the Anthropic API is rate-limited"
+          : null;
   if (e.status === 429) return "the Anthropic API is rate-limited";
   if (e.status === 529) return "the Anthropic API is overloaded";
   return e.status >= 500 ? `the Anthropic API failed (HTTP ${e.status})` : null;
+}
+
+/** A 429, or a streamed answer that broke off with a rate-limit error event. */
+function rateLimited(e: InstanceType<typeof Anthropic.APIError>): boolean {
+  return e.status === 429 || (e.status === undefined && e.type === "rate_limit_error");
 }
 
 function crashReason(e: unknown): string {

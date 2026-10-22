@@ -21459,7 +21459,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} \u2014 ${e.message}`);
           continue;
         }
-        if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
+        if (e instanceof Anthropic.APIError && rateLimited(e) && i + 1 < slots.length) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
           limited = e;
           continue;
@@ -21666,6 +21666,8 @@ ${foot}`
       let batch = await waitForBatch(client, job.batch, Math.min(deadline, syncAt), sleep2);
       let raced = false;
       if (!batch && syncAt <= deadline) {
+        const other = await reviewedElsewhere(job.batch, deadline);
+        if (other) return other;
         batch = await cancelSlow(job);
         if (!batch) return reviewSync(job);
         raced = true;
@@ -21754,10 +21756,13 @@ function apiDown(e) {
   if (e instanceof Anthropic.APIConnectionError) return "the Anthropic API is unreachable";
   if (!(e instanceof Anthropic.APIError)) return null;
   if (e.status === void 0)
-    return e.type === "overloaded_error" ? "the Anthropic API is overloaded" : e.type === "api_error" ? "the Anthropic API failed" : null;
+    return e.type === "overloaded_error" ? "the Anthropic API is overloaded" : e.type === "api_error" ? "the Anthropic API failed" : e.type === "rate_limit_error" ? "the Anthropic API is rate-limited" : null;
   if (e.status === 429) return "the Anthropic API is rate-limited";
   if (e.status === 529) return "the Anthropic API is overloaded";
   return e.status >= 500 ? `the Anthropic API failed (HTTP ${e.status})` : null;
+}
+function rateLimited(e) {
+  return e.status === 429 || e.status === void 0 && e.type === "rate_limit_error";
 }
 function crashReason(e) {
   return apiDown(e) ?? "the job hit an error";
