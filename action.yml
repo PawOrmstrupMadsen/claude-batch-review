@@ -18,10 +18,10 @@ inputs:
     description: "Backend router: auto applies the tier rules (README, \"Backend router\"); local, sonnet or opus forces that tier for one pass. A fork or pull_request_target run never gets local: it gets sonnet."
     default: auto
   sonnet-model:
-    description: Backend router, tier sonnet: the model id sent to the gateway.
+    description: "Backend router, tier sonnet: the model id sent to the gateway."
     default: claude-sonnet-5-5
   opus-model:
-    description: Backend router, tier opus: the model id sent to the gateway.
+    description: "Backend router, tier opus: the model id sent to the gateway."
     default: claude-opus-5-5
   local-model:
     description: "Backend router, tier local: the model name the router sends to the local model servers."
@@ -42,10 +42,10 @@ inputs:
     description: "Backend router: a pull request with at most this many changed lines (added plus deleted) goes local, outside sonnet-floor-owners."
     default: '150'
   local-timeout-minutes:
-    description: Backend router, local engine: how long Claude Code may review, queue waits at the router included.
+    description: "Backend router, local engine: how long Claude Code may review, queue waits at the router included."
     default: '60'
   local-context-tokens:
-    description: Backend router, local engine: the context window Claude Code compacts against.
+    description: "Backend router, local engine: the context window Claude Code compacts against."
     default: '262144'
   claude-code-version:
     description: "Backend router, local engine: the Claude Code CLI version, installed into the runner's home when another one (or none) is there."
