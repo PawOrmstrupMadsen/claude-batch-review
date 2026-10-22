@@ -21720,7 +21720,7 @@ ${foot}`
     const state = job ? { status: "pending", sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted } : { status: "overridden", sha };
     await upsert(
       state,
-      `${header(cfg.model)}\u23ED\uFE0F Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run this job.`
+      `${header(cfg.model)}\u23ED\uFE0F Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run the review job for the last push.`
     );
     job = null;
     return { status: "skipped", overridden, sha, reason: "skipped for the label", next: "" };

@@ -528,7 +528,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       : { status: "overridden", sha };
     await upsert(
       state,
-      `${header(cfg.model)}⏭️ Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run this job.`,
+      `${header(cfg.model)}⏭️ Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run the review job for the last push.`,
     );
     job = null;
     return { status: "skipped", overridden, sha, reason: "skipped for the label", next: "" };
