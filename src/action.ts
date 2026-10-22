@@ -399,15 +399,20 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   };
 
   /**
-   * Cancels a batch that is still queued. The batch it returns has ended after all (it finished before
-   * the cancel reached it), so its result is used instead of paying again; null otherwise.
+   * Cancels a batch that is still unfinished. The batch it returns has ended after all, so its result
+   * is used if it succeeded, instead of paying again; null when the batch is still not done.
    */
   const cancelSlow = async (j: Job): Promise<Anthropic.Messages.MessageBatch | null> => {
     const client = slots[j.slot].client;
     log.notice(`Batch ${j.batch} still queued after ${syncAfter}; canceling it and reviewing through the Messages API directly.`);
     try {
       const b = await client.messages.batches.cancel(j.batch);
-      return b.processing_status === "ended" ? b : null;
+      if (b.processing_status === "ended") return b;
+      // A request the model is already working on still finishes, and is billed, after a cancel:
+      // give it a short while to end before paying for a second answer.
+      const settled = await waitForBatch(client, j.batch, Date.now() + CANCEL_SETTLE_MS, sleep);
+      if (!settled) log.info(`Batch ${j.batch} is still ${b.processing_status} after ${CANCEL_SETTLE_MS / 1000} s; going direct.`);
+      return settled;
     } catch (e) {
       log.warning(`Could not cancel ${j.batch}: ${e instanceof Error ? e.message : String(e)}`);
       // Canceling an ended batch fails too: look once more before paying for a direct request.
@@ -533,6 +538,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
 }
 
 const RETRY = "Re-run this job to try again.";
+/** How long a canceled batch gets to end (its request may already be running) before the direct request. */
+const CANCEL_SETTLE_MS = 30_000;
 const FORCE = "Re-run with force to redo it.";
 const OUT_OF_CREDIT = "out of API credit";
 const EMPTY_ANSWER = "the model gave an empty answer";

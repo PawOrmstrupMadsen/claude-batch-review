@@ -21624,7 +21624,10 @@ ${foot}`
     log.notice(`Batch ${j.batch} still queued after ${syncAfter}; canceling it and reviewing through the Messages API directly.`);
     try {
       const b = await client.messages.batches.cancel(j.batch);
-      return b.processing_status === "ended" ? b : null;
+      if (b.processing_status === "ended") return b;
+      const settled = await waitForBatch(client, j.batch, Date.now() + CANCEL_SETTLE_MS, sleep2);
+      if (!settled) log.info(`Batch ${j.batch} is still ${b.processing_status} after ${CANCEL_SETTLE_MS / 1e3} s; going direct.`);
+      return settled;
     } catch (e) {
       log.warning(`Could not cancel ${j.batch}: ${e instanceof Error ? e.message : String(e)}`);
       const b = await client.messages.batches.retrieve(j.batch).catch(() => null);
@@ -21735,6 +21738,7 @@ ${foot}`
   }
 }
 var RETRY = "Re-run this job to try again.";
+var CANCEL_SETTLE_MS = 3e4;
 var FORCE = "Re-run with force to redo it.";
 var OUT_OF_CREDIT = "out of API credit";
 var EMPTY_ANSWER = "the model gave an empty answer";

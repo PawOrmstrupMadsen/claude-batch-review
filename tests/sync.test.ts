@@ -23,7 +23,7 @@ const sleep = async (ms: number) => {
 };
 const MIN = 60_000;
 
-const run = (w: World) => main({ fetch: w.fetch, sleep });
+const run = (w: World) => main({ fetch: w.fetch, sleep, post: w.post });
 const state = (w: World) => parseState(w.comment);
 /** How long a run took on the mocked clock. */
 async function timed(w: World): Promise<{ code: number; ms: number }> {
@@ -43,7 +43,8 @@ describe("sync-after-minutes", () => {
     const out = actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
     const { code, ms } = await timed(w);
     assert.equal(code, 0);
-    assert.ok(ms >= 5 * MIN && ms < 5.5 * MIN, `went direct after ${ms} ms`);
+    // 5 min, then 30 s for the canceling batch to end.
+    assert.ok(ms >= 5.5 * MIN && ms < 6 * MIN, `went direct after ${ms} ms`);
     assert.deepEqual(w.cancels, ["msgbatch_1"]);
     assert.equal(w.syncs.length, 1);
     assert.equal(w.syncs[0].key, "k1");
@@ -61,7 +62,7 @@ describe("sync-after-minutes", () => {
     const w = slow();
     actionEnv({ "api-keys": "k1", "max-wait-minutes": "45", "sync-after-minutes": "2" });
     const { ms } = await timed(w);
-    assert.ok(ms >= 2 * MIN && ms < 2.5 * MIN, `went direct after ${ms} ms`);
+    assert.ok(ms >= 2.5 * MIN && ms < 3 * MIN, `went direct after ${ms} ms`);
     assert.match(w.comment, /synchronous: batch still queued after 2 min/);
   });
 
@@ -74,6 +75,26 @@ describe("sync-after-minutes", () => {
     assert.equal(w.syncs.length, 0, "never pays twice");
     assert.match(w.comment, /<sub>Message Batches API · /);
     assert.equal(state(w)?.status, "done");
+  });
+
+  it("uses the batch's result when its running request ends after the cancel", async () => {
+    const w = slow();
+    w.cancel = "settles";
+    actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
+    assert.equal(await run(w), 0);
+    assert.deepEqual(w.cancels, ["msgbatch_1"]);
+    assert.equal(w.syncs.length, 0, "never pays twice");
+    assert.match(w.comment, /<sub>Message Batches API · /);
+  });
+
+  it("goes direct when the canceling batch ends canceled", async () => {
+    const w = slow();
+    w.cancel = "settles";
+    w.result = (b) => (b.canceled ? { type: "canceled" } : succeeded(VERDICT_PASS));
+    actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
+    assert.equal(await run(w), 0);
+    assert.equal(w.syncs.length, 1);
+    assert.match(w.comment, /Messages API, synchronous/);
   });
 
   it("still goes direct when the batch ended canceled", async () => {
@@ -124,7 +145,7 @@ describe("sync-after-minutes", () => {
     actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
     const { code, ms } = await timed(w);
     assert.equal(code, 0);
-    assert.equal(ms, 0, "no waiting");
+    assert.ok(ms <= 0.5 * MIN, `only the cancel's 30 s, waited ${ms} ms`);
     assert.equal(w.batches.length, 1, "no new batch");
     assert.deepEqual(w.cancels, ["msgbatch_1"]);
     assert.equal(w.syncs.length, 1);
@@ -171,6 +192,29 @@ describe("sync-after-minutes", () => {
     assert.equal(await run(w), 1);
     assert.equal(state(w)?.status, "failed");
     assert.match(w.comment, /### ⚠️ No review: out of API credit/);
+  });
+
+  const withFallback = { "api-keys": "k1", mode: "pass", "max-wait-minutes": "45", "fallback-backend": "openai", "openai-base-url": "http://llm.test:8000/v1", "openai-model": "local" };
+
+  it("hands the direct request to fallback-backend when no key has credit", async () => {
+    const w = slow();
+    w.syncKeys = { k1: "billing" };
+    actionEnv(withFallback);
+    assert.equal(await run(w), 0);
+    assert.equal(w.syncs.length, 1);
+    assert.equal(w.chats.length, 1);
+    assert.match(w.comment, /Fallback review: no Anthropic API key can be used/);
+    assert.equal(state(w)?.status, "done");
+  });
+
+  it("hands the direct request to fallback-backend when the API stays overloaded", async () => {
+    const w = slow();
+    w.syncKeys = { k1: "overloaded" };
+    actionEnv(withFallback);
+    assert.equal(await run(w), 0);
+    assert.equal(w.syncs.length, 5, "the SDK's 4 retries come first");
+    assert.equal(w.chats.length, 1);
+    assert.match(w.comment, /Fallback review: the Anthropic API is overloaded/);
   });
 
   it("retries a refusal directly on the fallback model", async () => {

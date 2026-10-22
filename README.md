@@ -60,9 +60,10 @@ Messages API directly, streamed: one review at full price instead of a gate that
 
 - It uses the key that submitted the batch and moves on to the next key exactly as a submission does (no
   credit, a spend limit, a refused key, a rate limit), falling back as `fallback-backend` says when none can.
-- If the batch ends while it is being canceled (the cancel answers with an ended batch, or the cancel fails
-  and the batch has ended), its succeeded result is used and nothing is paid twice; any other result goes
-  direct. A failed cancel is logged and the request goes direct anyway.
+- A request the model is already working on still finishes, and is billed, after a cancel. So a batch that
+  answers the cancel with `canceling` gets up to 30 s to end: a succeeded result is used and nothing is paid
+  twice. A canceled result, or a batch still canceling after that, goes direct. A failed cancel is logged,
+  the batch is looked at once more (it may have ended), and the request goes direct.
 - The answer is used as a batch result is (verdict, sticky comment, check title, refusal retry on
   `fallback-model`, sent directly too), and the footer reads `Messages API, synchronous: batch still queued
   after 5 min` with the full-price cost.
@@ -72,7 +73,9 @@ Messages API directly, streamed: one review at full price instead of a gate that
 - A label-event run never goes direct: it waits for the batch, and when the review run canceled it, takes
   that run's review from the comment instead of writing over it.
 
-`sync-after-minutes: 0` waits for the batch for the whole of `max-wait-minutes`, as before.
+`sync-after-minutes: 0` waits for the batch for the whole of `max-wait-minutes`, as before. The direct
+request has no time limit of its own beyond the SDK's: allow for one long answer after `sync-after-minutes`
+in `timeout-minutes`.
 
 ## OpenAI-compatible backend
 

@@ -52,8 +52,8 @@ export class World {
   syncs: { key: string; params: Json }[] = [];
   /** The message a direct request streams back; defaults to a passing review. */
   syncResult: (params: Json) => Json = () => succeeded(VERDICT_PASS).message as Json;
-  /** How a cancel answers: canceling, the batch ended just before the cancel landed, or an error. */
-  cancel: "canceling" | "ends" | "fails" = "canceling";
+  /** How a cancel answers: canceling for good, the batch ended just before the cancel landed, canceling and then ended on the next poll, or an error. */
+  cancel: "canceling" | "ends" | "settles" | "fails" = "canceling";
   /** Cancel requests, by batch id. */
   cancels: string[] = [];
   /** Batch creation requests per key, retries included. */
@@ -133,6 +133,7 @@ export class World {
       if (this.cancel === "fails") return error(400, "invalid_request_error", "Batch cannot be canceled.");
       b.canceled = true;
       if (this.cancel === "ends") b.ended = true;
+      if (this.cancel === "settles") b.polls = this.pollsToEnd = 0;
       return json(batchObject(b));
     }
     return error(404, "not_found_error", `${method} ${p}`);
