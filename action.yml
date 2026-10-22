@@ -51,7 +51,7 @@ inputs:
     description: "Backend router, local engine: the Claude Code CLI version, installed into the runner's home when another one (or none) is there."
     default: 2.1.263
   check-name:
-    description: "The verdict as a check run of its own on the pull request's head (`success` on ✅, ⚠️ or the override label; `failure` otherwise), for a ruleset to require. Default `Review` with backend router, none otherwise. Needs `checks: write`."
+    description: "The verdict as a check run of its own on the pull request's head (`success` on ✅, ⚠️ or the override label; `failure` otherwise, as `mode` decides: only `pass` fails on ❌), for a ruleset to require. Default `Review` with backend router, none otherwise. Needs `checks: write`."
     default: ''
   api-keys:
     description: Anthropic API keys, one per line, used in order; a key that is out of credit, at a spend limit or refused is skipped. Lines starting with '#' are ignored. Backend anthropic only.

@@ -452,6 +452,53 @@ describe("backend router: authors", () => {
   });
 });
 
+describe("backend router: the gate's edges", () => {
+  it("403 over budget for a floor owner: no review, never the local model", async () => {
+    const { w, calls, run } = setup();
+    big(w);
+    w.keys.rt = "over-budget";
+    actionEnv(inputs({ "sonnet-floor-owners": "o" }));
+    assert.equal(await run(), 1);
+    assert.equal(calls.length, 0);
+    assert.match(w.comment, /No review: over the review budget/);
+    assert.equal(check(w)?.conclusion, "failure");
+  });
+
+  it("the override label passes the check, and removing it turns the check red again", async () => {
+    const { w, calls, run } = setup();
+    w.pr.labels = [{ name: "review-override" }];
+    actionEnv(inputs(), { action: "labeled", pull_request: { number: 1 } });
+    assert.equal(await run(), 0);
+    assert.equal(calls.length, 0);
+    assert.equal(check(w)?.conclusion, "success");
+    w.pr.labels = [];
+    actionEnv(inputs(), { action: "unlabeled", pull_request: { number: 1 } });
+    assert.equal(await run(), 1);
+    assert.equal(w.createdChecks.length, 2);
+    assert.equal(check(w)?.conclusion, "failure");
+  });
+
+  it("a label run that crashes writes no check", async () => {
+    const { w, run } = setup();
+    actionEnv(inputs(), { action: "labeled", pull_request: { number: 1, head: { sha: "head1" } } });
+    w.comments = null as unknown as typeof w.comments;
+    assert.equal(await run(), 1);
+    assert.ok(logs.some((l) => l.startsWith("::error title=No review: the job hit an error")), "it crashed");
+    assert.equal(w.createdChecks.length, 0);
+  });
+
+  it("a dispatched run that crashes reports on the head commit it read", async () => {
+    const { w, run } = setup();
+    actionEnv(inputs(), {});
+    process.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+    w.comments = null as unknown as typeof w.comments;
+    assert.equal(await run(), 1);
+    assert.equal(check(w)?.output.title, "No review: the job hit an error");
+    assert.equal(check(w)?.head_sha, "head1");
+    assert.equal(check(w)?.conclusion, "failure");
+  });
+});
+
 describe("backend router: inputs", () => {
   it("needs router-url", async () => {
     const { run } = setup();

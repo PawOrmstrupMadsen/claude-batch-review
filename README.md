@@ -211,16 +211,18 @@ effect at the next push, or a re-run with *force*.
 ### The check and the gateway's answers
 
 - The verdict becomes a completed check run named `check-name` (`Review`) on the pull request's head:
-  `success` on ✅, ⚠️ or the override label, `failure` on ❌ or no review. Rulesets require that check, so the
+  `success` on ✅, ⚠️ or the override label, `failure` on ❌ or no review. It follows `mode` as the job does
+  (in `advisory` it never fails, in `complete` only without a review), so a gate uses `pass`. Rulesets require that check, so the
   job itself can have any other name, and a `pull_request_target` run still reports on the head commit.
 - A bot's pull request (author type `Bot`) is not reviewed, except Renovate's major updates and `opus-authors`:
   the check is `neutral`, which passes a required check as a skipped job does. A coding agent that runs as a
   GitHub App (type `Bot`) therefore passes unreviewed until the repository lists it in `opus-authors`. Drafts
   stay with the workflow's `if:`. A label-event run that finds no review of the head commit writes no check:
-  the review run's verdict stands.
+  the review run's verdict stands. Removing the override label from a commit it let through turns the check red.
 - `401` from the gateway: `No review: the review token is not set up`, as is an empty `router-token`.
 - `403` on a batch (the review client is over its budget): the local model reviews instead, and the comment
-  says so; where no checkout is allowed, `No review: over the review budget`. The next round tries Claude again.
+  says so; where no checkout is allowed, or for an owner in `sonnet-floor-owners`, `No review: over the review
+  budget`. The next round tries Claude again.
 - On `/v1/messages` the gateway steps a client that is ahead of its pace down a tier without saying so: the
   log names the tier asked for and the model that answered, and the comment's heading names that model.
 - A refusal is retried once on the other Claude tier (the gateway allows only its tiers' models).

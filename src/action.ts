@@ -100,6 +100,9 @@ export interface Outcome {
   sha?: string;
 }
 
+/** The head commit the run reviews, once it has read the pull request; a crash's check goes there. */
+let reviewedSha: string | undefined;
+
 async function run({ mode, overrideLabel, backend, fallback, event }: Settings, deps: Deps): Promise<Outcome> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const router = backend === "router";
@@ -141,6 +144,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   };
   const overridden = pr.labels.some((l) => l.name === overrideLabel);
   const sha = pr.head.sha;
+  reviewedSha = sha;
   const openaiKey = input("openai-api-key");
   if (openaiKey) log.mask(openaiKey);
   const baseUrl = input("openai-base-url");
@@ -231,7 +235,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       sha,
       reason: failed ? "the last attempt failed" : `${sha7} has none yet`,
       next: "Re-run the review job for the last push.",
-      undecided: true,
+      // An overridden commit has no review to wait for: the check must go red again without the label.
+      undecided: !(prior?.sha === sha && prior.status === "overridden"),
     };
   }
   if (!openai && prior?.status === "pending" && prior.batch) {
@@ -697,6 +702,9 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     if (e.kind === "token") return fail(cfg.model, `the router refused the review token (HTTP 401: ${e.message}).`, NO_TOKEN, TOKEN_NEXT);
     log.warning(`Over the review budget (HTTP 403: ${e.message}).`);
     const because = "the review budget is used up for now";
+    // The floor holds here too: such a repository waits for Claude rather than take the local model's word.
+    if (tierRules().sonnetFloorOwners.some((o) => o.toLowerCase() === owner.toLowerCase()))
+      return fail(cfg.model, `the gateway refused the batch (HTTP 403: ${e.message}), and ${owner} reviews never go below sonnet.`, OVER_BUDGET, "Re-run this job once the review budget allows it.");
     if (companion) {
       // The local pass already ran: it is the review.
       const c = companion;
@@ -1056,6 +1064,8 @@ export async function main(deps: Deps = {}): Promise<number> {
   }
   const label = `To merge anyway, add the \`${overrideLabel}\` label.`;
   const shas = [event.pull_request?.head?.sha, process.env.GITHUB_SHA];
+  reviewedSha = undefined;
+  const labelRun = /^(un)?labeled$/.test(event.action ?? "");
   const checkName = input("check-name", backend === "router" ? "Review" : "");
   try {
     const outcome = await run({ mode, overrideLabel, backend, fallback, event }, deps);
@@ -1098,13 +1108,14 @@ export async function main(deps: Deps = {}): Promise<number> {
     // The event's labels are known even when run() fails, so a crash still honours the override.
     if (mode !== "advisory" && (event.pull_request?.labels ?? []).some((l) => l.name === overrideLabel)) {
       log.notice(`${msg}\nThe \`${overrideLabel}\` label overrides the failure.`, title);
-      await publishCheck(deps, checkName, event.pull_request?.head?.sha, "success", `${title} (overridden by the label)`, msg.split("\n")[0]);
+      await publishCheck(deps, checkName, reviewedSha ?? event.pull_request?.head?.sha, "success", `${title} (overridden by the label)`, msg.split("\n")[0]);
       return 0;
     }
     summary(`### ${title}\n\n${RETRY} ${mode === "advisory" ? "" : label}`.trim());
     log.error(msg, title);
     if (mode !== "advisory") await titleCheck(deps, shas, title, `${RETRY} ${label}`);
-    await publishCheck(deps, checkName, event.pull_request?.head?.sha, mode === "advisory" ? "success" : "failure", title, `${RETRY} ${label}`);
+    // A label run that crashed decided nothing: the review run's verdict stands.
+    if (!labelRun) await publishCheck(deps, checkName, reviewedSha ?? event.pull_request?.head?.sha, mode === "advisory" ? "success" : "failure", title, `${RETRY} ${label}`);
     return 1;
   }
 }
