@@ -63,7 +63,7 @@ inputs:
     description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict or a review without a verdict line. The override label lets either mode through. A failure without a usable review is titled `No review: <why>` (annotation, job summary, sticky comment, and the check run itself when the workflow grants `checks: write`)."
     default: advisory
   override-label:
-    description: PR label that lets the job pass in modes `complete` and `pass` whatever the review says.
+    description: "PR label that lets the job pass in modes `complete` and `pass` whatever the review says. A run that finds it set submits and waits for nothing (unless `force`): it reuses a stored review of the head commit, or passes at once as `No review: skipped for the label (overridden by the label)`, keeping a queued batch for a run after the label is removed."
     default: review-override
   comment-author:
     description: Login that owns the sticky comment; change it only when github-token is not the Actions token.

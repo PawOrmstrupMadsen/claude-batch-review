@@ -225,7 +225,7 @@ describe("No review", () => {
     jobCheck(w);
     w.pr.labels = [{ name: "review-override" }];
     w.chat = () => ({ status: 200, text: JSON.stringify(completion("")) });
-    actionEnv({ backend: "openai", "openai-base-url": "http://llm.test:8000/v1", "openai-model": "local", mode: "pass", "max-wait-minutes": "0.5" });
+    actionEnv({ backend: "openai", "openai-base-url": "http://llm.test:8000/v1", "openai-model": "local", mode: "pass", "max-wait-minutes": "0.5", force: "true" });
     assert.equal(await run(w), 0);
     assert.equal(check(w)?.title, "No review: the model gave an empty answer (overridden by the label)");
     assert.equal(errorTitle(), undefined);
@@ -235,7 +235,7 @@ describe("No review", () => {
     const w = new World();
     w.pr.labels = [{ name: "review-override" }];
     w.keys = { k1: "credit" };
-    const out = actionEnv({ "api-keys": "k1", mode: "pass" });
+    const out = actionEnv({ "api-keys": "k1", mode: "pass", force: "true" });
     assert.equal(await run(w), 0);
     assert.match(out.summary(), /^### No review: out of API credit \(overridden by the label\)\n\nThe `review-override` label lets the pull request through\./);
     assert.doesNotMatch(out.summary(), /To merge anyway/);

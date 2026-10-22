@@ -21404,7 +21404,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   }
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
   const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
-  if (labelEvent && (overridden || !resumable)) {
+  const skipForLabel = overridden && mode !== "advisory" && !cfg.force;
+  if (labelEvent && !skipForLabel && (overridden || !resumable)) {
     log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
     const failed = prior?.sha === pr.head.sha && prior.status === "failed";
     return {
@@ -21713,7 +21714,19 @@ ${foot}`
     }
     return fail(job.model, "gave up after too many resubmissions.", "too many resubmissions");
   };
+  const skipOverridden = async () => {
+    log.notice(`PR #${prNumber} carries the \`${overrideLabel}\` label: not reviewing ${sha7}.`);
+    const kept = job ? ` Batch \`${job.batch}\` stays queued: a run after the label is removed collects it.` : "";
+    const state = job ? { status: "pending", sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted } : { status: "overridden", sha };
+    await upsert(
+      state,
+      `${header(cfg.model)}\u23ED\uFE0F Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run this job.`
+    );
+    job = null;
+    return { status: "skipped", overridden, sha, reason: "skipped for the label", next: "" };
+  };
   const review = async () => {
+    if (skipForLabel) return skipOverridden();
     if (openai) return reviewOpenAI();
     try {
       return await reviewAnthropic();

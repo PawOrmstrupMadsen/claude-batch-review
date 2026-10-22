@@ -15,6 +15,10 @@ The `mode` input decides whether it can block a merge:
 | `pass` | as `complete`, or the verdict is ❌ Changes needed, or the review has no recognisable verdict line |
 
 In `complete` and `pass`, the PR label named by `override-label` (`review-override`) lets any of these through.
+A run that finds the label already set submits and waits for nothing (unless *force*): it reuses a stored
+review of the head commit, or passes at once with the comment and the check saying it was not reviewed
+(`No review: skipped for the label (overridden by the label)`). A batch already queued for the commit stays
+in the comment's state, so a run after the label is removed collects it.
 
 Without a usable review (no answer, an empty answer, no verdict line, no credit, a batch still running), the
 failure reads as one line, for example `No review: out of API credit`, `No review: the model gave an empty
