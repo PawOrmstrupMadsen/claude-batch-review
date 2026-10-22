@@ -3,7 +3,9 @@
 A GitHub Action that reviews a pull request with Claude through the
 [Message Batches API](https://platform.claude.com/docs/en/build-with-claude/batch-processing), which bills
 half the normal token price. It takes a list of API keys and moves on to the next one when a key runs out
-of credit, so several prepaid balances can be used up one after the other.
+of credit, so several prepaid balances can be used up one after the other. With `backend: router` it goes
+through an LLM router and its gateway instead, and picks the reviewer per pull request: a local model, Sonnet
+or Opus ([Backend router](#backend-router)).
 
 The review is one sticky PR comment (marked `<!-- claude-batch-review … -->`), rewritten on every push.
 The `mode` input decides whether it can block a merge:
@@ -47,11 +49,12 @@ To redo a commit that already has a review: Actions → Claude review → Run wo
 A PR opened before the workflow existed has no **Claude review** check, so a required check blocks it. Close and
 reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the workflow on the PR.
 
-Inputs (`with:`): `backend` (`anthropic`), `api-keys` (backend `anthropic`), `fallback-backend` (empty),
+Inputs (`with:`): `backend` (`anthropic`; `openai`, `router`), `api-keys` (backend `anthropic`), `fallback-backend` (empty),
 `openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key` (backend or fallback `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
 `max-wait-minutes` (`20`; `30` for `openai`), `sync-after-minutes` (`5`; `0` turns it off), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
-`pr`, `github-token`, `comment-author`. Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
+`pr`, `github-token`, `comment-author`, `check-name` (empty; `Review` with backend `router`), and the router's own
+inputs ([Backend router](#backend-router)). Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
 `verdict` = `pass`, `minor`, `changes` or `unknown`. Full descriptions are in [`action.yml`](action.yml).
 
 Repo-specific review rules go in `.github/claude-review.md` (or the file named by `prompt-file`).
@@ -149,6 +152,128 @@ too ends as no review (`No review: the model gave no answer`, …). Fork PRs nev
 `max-wait-minutes` of its own (default 30) after whatever the batch took, so one job can wait up to
 2 × `max-wait-minutes`: with a fallback, set `timeout-minutes` above that (the example's 45 minutes need
 `timeout-minutes: 100`).
+
+## Backend router
+
+`backend: router` sends every request through an LLM router (`router-url`) with the gateway's client token for
+reviews (`router-token`). The gateway books each review in its ledger against the review client's budget, and
+bills the key the token belongs to. The action picks a **tier** per pull request, then runs the engine for it:
+
+| Tier | Engine |
+|---|---|
+| `local` | Claude Code, read-only (Read, Glob and Grep), over a checkout of the pull request's head, with the router's local model (`local-model`, default `local`) |
+| `sonnet`, `opus` | The one-shot review this action always sent (diff plus changed files, no tools), as a batch through the router's `/v1/messages/batches`, model `sonnet-model` or `opus-model` (`claude-sonnet-5-5`, `claude-opus-5-5`). [Slow batches](#slow-batches) go to the router's `/v1/messages` |
+
+### Tier rules
+
+With `tier: auto` (the default), the first rule that matches decides:
+
+1. The `second-opinion-label` (`needs 2nd opinion`): `opus`, plus a local pass ([Second opinion](#second-opinion)).
+2. A label in `opus-labels` (`security`): `opus`.
+3. An author in `opus-authors` (a coding agent's machine user, say), or Renovate on a major update (its
+   `major` label or branch, `(major)` in the title, or a title ending "to v5"): `opus`.
+4. A later round on the same pull request keeps the tier its sticky comment recorded, unless that round
+   produced no review (failed, or an answer without a verdict line).
+5. Docs only (every changed path under `docs/` or `changelog.d/`, or `*.md`), or at most `local-max-lines`
+   (150) changed lines: `local`.
+6. Anything else: `sonnet`.
+
+A repository whose owner is in `sonnet-floor-owners` (`WhistleSafe`) never gets less than `sonnet`, whatever
+the rule or the `tier` input. `tier: local`, `sonnet` or `opus` skips the rules and runs that one tier. Labels
+match without case. The gateway's own `auto` is not asked yet: the rules come first, a sorter later.
+
+Only a `pull_request` or `workflow_dispatch` run of a branch in the same repository checks code out. A fork's
+pull request, or any `pull_request_target` run, gets `sonnet` instead of `local`, which reads the pull request
+through the API only.
+
+### The local engine
+
+- The action fetches `refs/pull/<n>/head` shallowly into a temporary folder (the GitHub token travels in the
+  environment, never on a command line) and refuses a checkout that is not the head commit it reviews.
+- The pull request may not configure its reviewer: `.claude/`, `.mcp.json`, every `CLAUDE.md`,
+  `CLAUDE.local.md` and `AGENTS.md`, and every symbolic link are deleted. The base commit's guidance (as for
+  Claude, [How it works](#how-it-works)) goes into the system prompt, with the same answer shape and verdict line.
+- Claude Code (`claude-code-version`, installed into the runner's home when missing) runs with an allowlisted
+  environment (no GitHub or Actions tokens, and never the review token), a scratch `HOME`, no MCP servers,
+  Read, Glob and Grep only, and Read denied for the runner's credentials, temp and the system folders. A small
+  relay on 127.0.0.1 reshapes its requests for strict chat templates.
+- It may take `local-timeout-minutes` (60), queue waits at the router included. The runner needs `git`,
+  `curl` and `bash`, and must reach the router.
+
+### Second opinion
+
+The `needs 2nd opinion` label gets both engines: the Opus batch is queued first, the local pass runs while
+it waits, and the sticky comment holds the Claude review with the local pass below it. The stricter verdict
+counts (❌ over no verdict over ⚠️ over ✅), so a local pass without a review blocks in `pass` mode too. A
+label-event run never collects such a batch; the review run does. A label added after a commit's review takes
+effect at the next push, or a re-run with *force*.
+
+### The check and the gateway's answers
+
+- The verdict becomes a completed check run named `check-name` (`Review`) on the pull request's head:
+  `success` on ✅, ⚠️ or the override label, `failure` on ❌ or no review. Rulesets require that check, so the
+  job itself can have any other name, and a `pull_request_target` run still reports on the head commit.
+- A bot's pull request (author type `Bot`) is not reviewed, except Renovate's major updates and `opus-authors`:
+  the check is `neutral`, which passes a required check as a skipped job does. Drafts stay with the workflow's
+  `if:`.
+- `401` from the gateway: `No review: the review token is not set up`, as is an empty `router-token`.
+- `403` on a batch (the review client is over its budget): the local model reviews instead, and the comment
+  says so; where no checkout is allowed, `No review: over the review budget`. The next round tries Claude again.
+- On `/v1/messages` the gateway steps a client that is ahead of its pace down a tier without saying so: the
+  log names the tier asked for and the model that answered, and the comment's heading names that model.
+- A refusal is retried once on the other Claude tier (the gateway allows only its tiers' models).
+  `fallback-backend` does not apply.
+
+The comment ends with the tier and the rule that chose it, and its state keeps the tier for the next round.
+
+### Moving a repository to the router
+
+The workflow (on a self-hosted runner that reaches the router; `vars.LLM_ROUTER_URL` and
+`secrets.LLM_REVIEW_TOKEN` are the repository's own variable and secret):
+
+```yaml
+name: Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      pr: { description: Pull request number, required: true, type: number }
+      force: { description: Re-review a commit that already has a review, type: boolean, default: false }
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || inputs.pr }}-${{ contains(github.event.action, 'labeled') && 'label' || 'review' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    # Not "Review": the action writes the check of that name itself.
+    name: llm-review
+    # Bots are left to the action, which reviews Renovate's major updates.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, linux, x64, <repo-label>]
+    # A second opinion: up to local-timeout-minutes of local pass, then the rest of the batch.
+    timeout-minutes: 120
+    steps:
+      - uses: PawOrmstrupMadsen/claude-batch-review@<sha> # vX.Y.Z
+        with:
+          backend: router
+          router-url: ${{ vars.LLM_ROUTER_URL }}
+          router-token: ${{ secrets.LLM_REVIEW_TOKEN }}
+          pr: ${{ github.event.pull_request.number || inputs.pr }}
+          force: ${{ inputs.force || false }}
+          mode: pass
+          max-wait-minutes: 45
+          # opus-authors: <agent-login>
+```
+
+Then switch the ruleset's required check from `Claude review` to `Review`, and drop
+`ANTHROPIC_REVIEW_KEYS` from the repository once nothing else reads it.
 
 ## Releases and pinning
 

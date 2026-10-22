@@ -8,12 +8,12 @@ export interface Pull {
   draft: boolean;
   labels: { name: string }[];
   html_url: string;
-  user: { login: string };
+  user: { login: string; type?: string };
   base: { sha: string; ref: string; repo?: { full_name: string } | null };
   head: { sha: string; ref: string; repo?: { full_name: string } | null };
 }
 
-interface PrFile {
+export interface PrFile {
   filename: string;
   status: string;
   additions: number;
@@ -50,9 +50,9 @@ export async function buildContext(
   pr: Pull,
   maxInputTokens: number,
   promptFile: string,
+  prFiles?: PrFile[],
 ): Promise<ReviewContext> {
-  const repo = `/repos/${gh.owner}/${gh.repo}`;
-  const files = await gh.paginate<PrFile>(`${repo}/pulls/${pr.number}/files`);
+  const files = prFiles ?? (await pullFiles(gh, pr.number));
   const omitted: string[] = [];
   let budget = maxInputTokens * CHARS_PER_TOKEN;
   const guidance: string[] = [];
@@ -135,6 +135,10 @@ export async function buildContext(
   }
 
   return { guidance: guidance.join("\n"), text: parts.join("\n"), files: files.length, omitted };
+}
+
+export function pullFiles(gh: GitHub, pr: number): Promise<PrFile[]> {
+  return gh.paginate<PrFile>(`/repos/${gh.owner}/${gh.repo}/pulls/${pr}/files`);
 }
 
 async function tree(gh: GitHub, sha: string): Promise<{ blobs: TreeEntry[]; truncated: boolean }> {

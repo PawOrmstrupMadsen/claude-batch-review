@@ -1,10 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { buildContext, type Pull, type ReviewContext } from "./context.js";
+import { buildContext, pullFiles, type PrFile, type Pull, type ReviewContext } from "./context.js";
 import { GitHub, input, log, setOutput, summary } from "./github.js";
+import { localReview, type Checkout, type LocalAnswer, type LocalResult, type RunClaude } from "./local.js";
 import { chatReview, httpPost, type ChatAnswer, type Post } from "./openai.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
+import { chooseTier, planEngines, renovateMajor, stricter, TIERS, type EnginePlan, type Tier, type TierChoice, type TierInput } from "./tier.js";
 
 const MARKER = "<!-- claude-batch-review";
 /** GitHub rejects comment bodies over 65,536 characters. */
@@ -29,7 +31,7 @@ interface Slot {
 export type Verdict = "pass" | "minor" | "changes" | "unknown";
 export type Status = "done" | "pending" | "failed" | "skipped";
 export type Mode = "advisory" | "complete" | "pass";
-export type Backend = "anthropic" | "openai";
+export type Backend = "anthropic" | "openai" | "router";
 
 /** Seams for tests: the network and the clock. */
 export interface Deps {
@@ -37,6 +39,9 @@ export interface Deps {
   sleep?: (ms: number) => Promise<void>;
   /** The `openai` backend's HTTP POST. */
   post?: Post;
+  /** The local engine's Claude Code run and checkout (backend router). */
+  runClaude?: RunClaude;
+  checkout?: Checkout;
 }
 
 interface Settings {
@@ -57,6 +62,8 @@ export interface State {
   key?: string;
   model?: string;
   submitted?: string;
+  /** Backend router: the tier this round chose, which a later round keeps. */
+  tier?: Tier;
 }
 
 interface Job {
@@ -86,20 +93,28 @@ export interface Outcome {
   note?: string;
   /** The model that reviewed through the fallback backend. */
   fallbackModel?: string;
+  /** Backend router: why this pull request needs no review (a bot's), which passes the gate. */
+  exempt?: string;
   sha?: string;
 }
 
 async function run({ mode, overrideLabel, backend, fallback, event }: Settings, deps: Deps): Promise<Outcome> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const keys = input("api-keys")
-    .split(/\r?\n/)
-    .map((k) => k.trim())
-    .filter((k) => k && !k.startsWith("#"));
+  const router = backend === "router";
+  const routerUrl = input("router-url").replace(/\/+$/, "");
+  if (router && !/^https?:\/\/[^/]/.test(routerUrl)) throw new Error("backend router needs the `router-url` input (http://host:port).");
+  // The router hands the token to the gateway, which picks the billing key and books the spend.
+  const keys = router
+    ? [input("router-token")].filter(Boolean)
+    : input("api-keys")
+        .split(/\r?\n/)
+        .map((k) => k.trim())
+        .filter((k) => k && !k.startsWith("#"));
   keys.forEach(log.mask);
   const slots: Slot[] = keys.map((key) => ({
     key,
     fp: createHash("sha256").update(key).digest("hex").slice(0, 8),
-    client: new Anthropic({ apiKey: key, maxRetries: 4, fetch: deps.fetch }),
+    client: new Anthropic({ apiKey: key, maxRetries: 4, fetch: deps.fetch, ...(router ? { baseURL: routerUrl } : {}) }),
   }));
 
   const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
@@ -138,6 +153,18 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     log.notice("Fork pull request: the openai backend skips it.");
     return { status: "skipped", overridden, sha, reason: "the openai backend skips fork pull requests", next: "" };
   }
+  if (router && pr.user.type === "Bot") {
+    const r = tierRules();
+    const facts = { author: pr.user, labels: pr.labels.map((l) => l.name), title: pr.title, headRef: pr.head.ref };
+    if (!renovateMajor(facts) && !r.opusAuthors.some((a) => a.toLowerCase() === pr.user.login.toLowerCase())) {
+      log.notice(`A pull request by ${pr.user.login}: not reviewed.`);
+      return { status: "skipped", overridden, sha, exempt: `a pull request by ${pr.user.login}` };
+    }
+  }
+  if (router && keys.length === 0) {
+    log.warning("No router token (the `router-token` input is empty, or a fork PR without secrets).");
+    return { status: "failed", overridden, sha, reason: NO_TOKEN, next: TOKEN_NEXT };
+  }
   if (!openai && keys.length === 0) {
     log.notice("No API keys (secret unset, or a fork PR without secrets): skipping the review.");
     return { status: "skipped", overridden, sha, reason: "no API keys", next: "Set the `api-keys` input, then re-run this job." };
@@ -156,10 +183,41 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     const verdict = prior.verdict ?? parseVerdict(comment?.body ?? "");
     return { status: "done", verdict, overridden, sha, ...(verdict === "unknown" ? { reason: NO_VERDICT } : {}), note: `Stored review of ${sha7}.` };
   }
+  // Backend router: the tier rules, then the engines this run may use.
+  let files: PrFile[] | undefined;
+  let choice: TierChoice | null = null;
+  let plan: EnginePlan = { local: false, claude: null, note: "" };
+  const localModel = input("local-model", "local");
+  if (router) {
+    files = await pullFiles(gh, prNumber);
+    // An earlier round that produced a review (or is still waiting for one) hands its tier on.
+    const reviewed = prior?.status === "pending" || (prior?.status === "done" && !!prior.verdict && prior.verdict !== "unknown");
+    choice = chooseTier(
+      {
+        owner,
+        author: pr.user,
+        labels: pr.labels.map((l) => l.name),
+        title: pr.title,
+        headRef: pr.head.ref,
+        files,
+        prior: prior?.tier && TIERS.includes(prior.tier) ? { tier: prior.tier, reviewed } : null,
+      },
+      tierRules(),
+    );
+    plan = planEngines(choice, { event: process.env.GITHUB_EVENT_NAME ?? "", fork });
+    cfg.model = plan.claude ? tierModel(plan.claude) : localModel;
+    // The gateway allows only its tiers' models: a refusal is retried on the other Claude tier.
+    cfg.fallbackModel = tierModel(plan.claude === "opus" ? "sonnet" : "opus");
+    log.notice(`Tier ${choice.tier}${plan.local && plan.claude ? " and a local pass" : ""}: ${choice.why}.${plan.note ? ` ${capitalise(plan.note)}.` : ""}`);
+  }
+  const recordedTier: Tier = plan.claude ?? "local";
+  const mayCheckOut = planEngines({ tier: "local", secondOpinion: false, why: "" }, { event: process.env.GITHUB_EVENT_NAME ?? "", fork }).local;
+
   // A label change only re-evaluates the gate: it may resume a pending batch, never pay for a new one.
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
   // Only a batch can be resumed; the openai backend has none.
-  const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
+  // With a local pass beside it, only the review run collects the batch: it alone holds both answers.
+  const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch && (!router || (!!plan.claude && !plan.local));
   // The label already lets the PR through: no batch is submitted or waited for (force reviews anyway).
   const skipForLabel = overridden && mode !== "advisory" && !cfg.force;
   if (labelEvent && !skipForLabel && (overridden || !resumable)) {
@@ -175,7 +233,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   }
   if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
-    if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
+    if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force && (!router || !!plan.claude)) {
       const submitted = prior.submitted ?? "";
       job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted, started: Date.parse(submitted) || Date.now() };
       log.info(`Resuming batch ${job.batch} for ${sha7}.`);
@@ -188,7 +246,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   }
 
   let ctx: ReviewContext | null = null;
-  const context = async () => (ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile));
+  const context = async () => (ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile, files));
 
   /** The one request a review sends, as a batch request or a direct Messages API call. */
   const request = async (model: string): Promise<Anthropic.Messages.MessageCreateParamsNonStreaming> => {
@@ -221,6 +279,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       try {
         return { value: await call(slots[i]), slot: i };
       } catch (e) {
+        // The gateway's own answers: an unknown token, or a batch over the review client's budget.
+        if (router && e instanceof Anthropic.APIError && (e.status === 401 || e.status === 403)) throw new RouterRefused(e.status === 401 ? "token" : "budget", e.message);
         if (e instanceof Anthropic.APIError && keyUnusable(e.status, e.type, e.message)) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} — ${e.message}`);
           continue;
@@ -247,7 +307,15 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     return { batch: r.value.id, slot: r.slot, model, submitted: r.value.created_at, started: Date.now() };
   };
 
+  /** Backend router, `needs 2nd opinion`: the local pass, added to the Claude pass's comment. */
+  let companion: LocalPass | null = null;
+  const tierLine = choice ? `<sub>Tier \`${recordedTier}\`${plan.local && plan.claude ? " and a local pass" : ""}: ${choice.why}${plan.note ? `; ${plan.note}` : ""}. Through the LLM router.</sub>` : "";
   const upsert = async (state: State, body: string) => {
+    if (router) {
+      state = { ...state, tier: recordedTier };
+      if (state.status === "done" && companion) state.verdict = stricter(state.verdict ?? "unknown", companion.verdict);
+      if (state.status === "done" || state.status === "failed") body = [body, companion?.section, tierLine].filter(Boolean).join("\n\n");
+    }
     const head = `${MARKER} ${JSON.stringify(state)} -->\n`;
     const room = MAX_COMMENT_CHARS - head.length;
     const full = head + (body.length <= room ? body : `${body.slice(0, room - 80)}\n\n… [comment cut at GitHub's size limit]`);
@@ -260,7 +328,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     }
   };
   // The openai backend's heading names only the model, so its review never passes for Claude's.
-  const header = (model: string, local = openai) => `## ${local ? "Review" : "Claude review"} · \`${model}\` · ${sha7}\n\n`;
+  const isLocal = (model: string) => openai || (router && !model.startsWith("claude"));
+  const header = (model: string, local = isLocal(model)) => `## ${local ? "Review" : "Claude review"} · \`${model}\` · ${sha7}\n\n`;
   const wayOut = (next: string, blocks: boolean) => (blocks ? `${next} To merge anyway, add the \`${overrideLabel}\` label.` : next);
   // The same line the check's title and the job summary give.
   const noReview = (reason: string, next: string, blocks: boolean, detail = "") =>
@@ -272,7 +341,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       `${header(j.model)}⏳ Queued in batch \`${j.batch}\` (key ${j.slot + 1}/${slots.length}). ` +
         "This comment becomes the review when the batch ends. If the workflow times out first, re-run it to collect the result.",
     );
-  const fail = async (model: string, why: string, reason: string, next = RETRY, local = openai): Promise<Outcome> => {
+  const fail = async (model: string, why: string, reason: string, next = RETRY, local = isLocal(model)): Promise<Outcome> => {
     await upsert({ status: "failed", sha }, `${header(model, local)}${noReview(reason, next, mode !== "advisory", capitalise(why))}`);
     log.warning(why);
     return { status: "failed", overridden, sha, reason, next };
@@ -339,13 +408,14 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   /** Every key is out: the fallback reviews, or the run ends without a review. */
   const outOfCredit = (model: string, why: string): Promise<Outcome> => {
     job = null;
+    if (router) return fail(model, why === keysWhy ? "the gateway's Anthropic key cannot be used (out of credit, at a spend limit, or refused)." : why, OUT_OF_CREDIT, "Add credit to the gateway's key, then re-run this job.");
     return canFallBack
       ? reviewOpenAI("no Anthropic API key can be used (out of credit, at a spend limit, or refused)")
       : fail(model, why, OUT_OF_CREDIT, "Add credit or a key to `ANTHROPIC_REVIEW_KEYS`, then re-run this job.");
   };
 
   /** Whose comment a crash rewrites: the fallback's once it runs. */
-  let running = { model: cfg.model, local: openai };
+  let running = { model: cfg.model, local: isLocal(cfg.model) };
 
   /** Posts a finished Claude answer, from a batch or a direct call, as the review. */
   const postReview = async (msg: Anthropic.Messages.Message, foot: string, via: string): Promise<Outcome> => {
@@ -362,6 +432,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}\n\n${foot}`,
     );
     log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    // The gateway may step a new session down a tier when the client is ahead of its pace.
+    if (router) log.info(`Asked the router for ${cfg.model} (tier ${recordedTier}); ${msg.model} answered.`);
     return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the ${via}.` };
   };
 
@@ -534,12 +606,126 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     return { status: "skipped", overridden, sha, reason: "skipped for the label", next: "" };
   };
 
+  /** The local engine on this pull request's head, as the router's local tier reaches it. */
+  const runLocal = async (): Promise<LocalResult> => {
+    const c = await context();
+    const prJson = JSON.stringify(
+      {
+        number: pr.number,
+        title: pr.title,
+        body: pr.body ?? "",
+        author: pr.user.login,
+        labels: pr.labels.map((l) => l.name),
+        base: pr.base.ref,
+        head: pr.head.ref,
+        files: (files ?? []).map((f) => ({ path: f.filename, status: f.status, additions: f.additions, deletions: f.deletions })),
+      },
+      null,
+      2,
+    );
+    const res = await gh.request(`/repos/${owner}/${repo}/pulls/${prNumber}`, { accept: "application/vnd.github.diff" });
+    // GitHub refuses the whole diff of a very large pull request; the per-file patches still exist.
+    const diff = res.ok ? await res.text() : (files ?? []).map((f) => `--- ${f.filename}\n${f.patch ?? "[binary or too large]"}\n`).join("");
+    return localReview(
+      {
+        pr,
+        owner,
+        repo,
+        routerUrl,
+        model: localModel,
+        guidance: c.guidance,
+        prJson,
+        diff,
+        githubToken: input("github-token"),
+        timeoutMs: num("local-timeout-minutes", 60) * 60_000,
+        maxOutputTokens: cfg.maxOutputTokens,
+        contextTokens: num("local-context-tokens", 262144),
+        claudeVersion: input("claude-code-version", "2.1.263"),
+      },
+      deps,
+    );
+  };
+  const localFooter = (a: LocalAnswer) =>
+    `---\n<sub>Claude Code over the checkout, read-only · \`${localModel}\` through the LLM router · ${a.turns} turns · took ${duration(Math.round(a.ms / 1000))} · ${LINK}</sub>`;
+
+  /** The local tier's review, or the local model standing in for Claude (`because`). */
+  const reviewLocal = async (because = ""): Promise<Outcome> => {
+    running = { model: localModel, local: true };
+    const via = because ? `> ↪️ ${capitalise(because)}, so the local model reviewed this instead of Claude.\n\n` : "";
+    await upsert({ status: "pending", sha, model: localModel }, `${header(localModel, true)}${via}⏳ Reviewing with the local model. This comment becomes the review when it answers.`);
+    const r = await runLocal();
+    if (!r.ok) return fail(localModel, r.why, r.reason, RETRY, true);
+    const verdict = parseVerdict(r.answer.text);
+    const bad = unusable(r.answer.text, verdict);
+    await upsert({ status: "done", verdict, sha, model: localModel }, `${header(localModel, true)}${via}${bad.head}${r.answer.text}\n\n${localFooter(r.answer)}`);
+    log.info(`Posted the local review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${localModel}\` (Claude Code over the checkout)${because ? `: ${because}` : ""}.` };
+  };
+
+  /** The local pass beside the Claude pass (`needs 2nd opinion`); it writes no comment of its own. */
+  const localPass = async (): Promise<LocalPass> => {
+    const r = await runLocal();
+    const title = `## Second opinion · \`${localModel}\` · ${sha7}`;
+    if (!r.ok) {
+      log.warning(`Local pass: ${r.why}`);
+      const reason = `the local pass gave no review (${r.reason})`;
+      return { verdict: "unknown", reason, section: `---\n\n${title}\n\n### ⚠️ No review: ${reason}\n\n${capitalise(r.why)}` };
+    }
+    const verdict = parseVerdict(r.answer.text);
+    log.info(`Local pass for #${prNumber} @ ${sha7}: verdict ${verdict}.`);
+    return {
+      verdict,
+      reason: verdict === "unknown" ? "the local pass has no verdict line" : undefined,
+      section: `---\n\n${title}\n\n${r.answer.text}\n\n${localFooter(r.answer)}`,
+    };
+  };
+
+  /** Both passes ran: the stricter verdict counts. */
+  const combine = (o: Outcome): Outcome => {
+    if (!companion || o.status !== "done") return o;
+    const verdict = stricter(o.verdict ?? "unknown", companion.verdict);
+    const reason = verdict !== "unknown" ? undefined : o.verdict === "unknown" ? (o.reason ?? NO_VERDICT) : (companion.reason ?? NO_VERDICT);
+    return { ...o, verdict, reason, note: `${o.note ?? ""} A local pass by \`${localModel}\` reviewed beside it; the stricter verdict counts.`.trim() };
+  };
+
+  /** The gateway refused: the token is not set up (401), or the batch is over the review budget (403). */
+  const refusedByRouter = async (e: RouterRefused): Promise<Outcome> => {
+    job = null;
+    if (e.kind === "token") return fail(cfg.model, `the router refused the review token (HTTP 401: ${e.message}).`, NO_TOKEN, TOKEN_NEXT);
+    log.warning(`Over the review budget (HTTP 403: ${e.message}).`);
+    const because = "the review budget is used up for now";
+    if (companion) {
+      // The local pass already ran: it is the review.
+      const c = companion;
+      companion = null;
+      await upsert(
+        { status: "done", verdict: c.verdict, sha, model: localModel },
+        `${header(localModel, true)}> ↪️ ${capitalise(because)}, so only the local pass reviewed this.\n\n${c.section.replace(/^---\n\n/, "")}`,
+      );
+      return { status: "done", verdict: c.verdict, overridden, sha, reason: c.reason, note: `Reviewed by \`${localModel}\` only: ${because}.` };
+    }
+    if (mayCheckOut) return reviewLocal(because);
+    return fail(cfg.model, `the gateway refused the batch (HTTP 403: ${e.message}), and this pull request may not be checked out for the local model.`, OVER_BUDGET, "Re-run this job once the review budget allows it.");
+  };
+
   const review = async (): Promise<Outcome> => {
     if (skipForLabel) return skipOverridden();
     if (openai) return reviewOpenAI();
+    if (router && !plan.claude) return reviewLocal();
     try {
-      return await reviewAnthropic();
+      if (router && plan.local) {
+        // The batch is queued first, so it runs while the local model reads the checkout.
+        if (!job) {
+          job = await submit(0, cfg.model);
+          if (!job) return await outOfCredit(cfg.model, keysWhy);
+          await queue(job);
+        }
+        companion = await localPass();
+      }
+      return combine(await reviewAnthropic());
     } catch (e) {
+      if (e instanceof RouterRefused) return refusedByRouter(e);
+      if (router && e instanceof Anthropic.APIError && e.status === 401) return refusedByRouter(new RouterRefused("token", e.message));
       if (!(e instanceof AnthropicDown)) throw e;
       log.warning(`${e.reason}: ${e.message}`);
       job = null;
@@ -563,12 +749,54 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
 }
 
 const RETRY = "Re-run this job to try again.";
+const NO_TOKEN = "the review token is not set up";
+const TOKEN_NEXT = "Set the `router-token` input to the gateway's review token, then re-run this job.";
+const OVER_BUDGET = "over the review budget";
 /** How long a canceled batch gets to end (its request may already be running) before the direct request. */
 const CANCEL_SETTLE_MS = 30_000;
 const FORCE = "Re-run with force to redo it.";
 const OUT_OF_CREDIT = "out of API credit";
 const EMPTY_ANSWER = "the model gave an empty answer";
 const NO_VERDICT = "the answer has no verdict line";
+
+/** The gateway's refusal: an unknown token (401), or a batch over the review client's budget (403). */
+class RouterRefused extends Error {
+  constructor(
+    readonly kind: "token" | "budget",
+    detail: string,
+  ) {
+    super(detail);
+  }
+}
+
+interface LocalPass {
+  section: string;
+  verdict: Verdict;
+  reason?: string;
+}
+
+/** Backend router: the model id the gateway takes for a Claude tier. */
+function tierModel(tier: Exclude<Tier, "local">): string {
+  return tier === "opus" ? input("opus-model", "claude-opus-5-5") : input("sonnet-model", "claude-sonnet-5-5");
+}
+
+function tierRules() {
+  const forced = input("tier", "auto") as TierInput;
+  if (forced !== "auto" && !TIERS.includes(forced)) throw new Error(`Input tier must be auto, local, sonnet or opus, got "${forced}".`);
+  const list = (name: string, fallback: string) =>
+    input(name, fallback)
+      .split(/[\n,]/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  return {
+    forced,
+    secondOpinionLabel: input("second-opinion-label", "needs 2nd opinion"),
+    opusLabels: list("opus-labels", "security"),
+    opusAuthors: list("opus-authors", ""),
+    sonnetFloorOwners: list("sonnet-floor-owners", "WhistleSafe"),
+    localMaxLines: num("local-max-lines", 150, true),
+  };
+}
 
 /** The Anthropic API cannot take the request now (after the SDK's own retries); a fallback can review instead. */
 class AnthropicDown extends Error {
@@ -786,6 +1014,24 @@ async function titleCheck(deps: Deps, shas: (string | undefined)[], title: strin
   }
 }
 
+/**
+ * Writes the verdict as a completed check run of its own (`check-name`) on the pull request's head,
+ * where a ruleset can require it whatever the job is called and whichever event ran it.
+ */
+async function publishCheck(deps: Deps, name: string, sha: string | undefined, conclusion: "success" | "failure" | "neutral", title: string, text: string): Promise<void> {
+  const [owner, repo] = input("repository", process.env.GITHUB_REPOSITORY ?? "").split("/");
+  if (!name || !sha || !owner || !repo) return;
+  const gh = new GitHub(input("github-token"), owner, repo, deps.fetch);
+  try {
+    await gh.json(`/repos/${owner}/${repo}/check-runs`, {
+      method: "POST",
+      body: JSON.stringify({ name, head_sha: sha, status: "completed", conclusion, output: { title, summary: text || title } }),
+    });
+  } catch (e) {
+    log.warning(`Could not write the ${name} check run (the workflow needs \`checks: write\`): ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`);
+  }
+}
+
 /** Runs the action and returns the process exit code. */
 export async function main(deps: Deps = {}): Promise<number> {
   const mode = input("mode", "advisory") as Mode;
@@ -797,8 +1043,8 @@ export async function main(deps: Deps = {}): Promise<number> {
     log.error(`Input mode must be advisory, complete or pass, got "${mode}".`);
     return 1;
   }
-  if (!["anthropic", "openai"].includes(backend)) {
-    log.error(`Input backend must be anthropic or openai, got "${backend}".`);
+  if (!["anthropic", "openai", "router"].includes(backend)) {
+    log.error(`Input backend must be anthropic, openai or router, got "${backend}".`);
     return 1;
   }
   if (fallback && (fallback !== "openai" || backend !== "anthropic")) {
@@ -807,27 +1053,39 @@ export async function main(deps: Deps = {}): Promise<number> {
   }
   const label = `To merge anyway, add the \`${overrideLabel}\` label.`;
   const shas = [event.pull_request?.head?.sha, process.env.GITHUB_SHA];
+  const checkName = input("check-name", backend === "router" ? "Review" : "");
   try {
     const outcome = await run({ mode, overrideLabel, backend, fallback, event }, deps);
     setOutput("status", outcome.status);
     setOutput("verdict", outcome.verdict ?? "");
+    if (outcome.exempt) {
+      const title = `Not reviewed: ${outcome.exempt}`;
+      summary(`### ${title}`);
+      // Neutral passes a required check, as a skipped job does.
+      await publishCheck(deps, checkName, outcome.sha, "neutral", title, "Bots' pull requests are not reviewed, except Renovate's major updates and the listed authors.");
+      return 0;
+    }
     const b = blocker(mode, outcome);
     const title = headline(outcome, mode);
     const overrides = `The \`${overrideLabel}\` label lets the pull request through.`;
     const way = !b ? "" : outcome.overridden ? overrides : [b.next, label].filter(Boolean).join(" ");
     summary(`### ${b && outcome.overridden ? `${title} (overridden by the label)` : title}\n\n${[way, outcome.note].filter(Boolean).join("\n\n")}`);
+    const sha = outcome.sha ?? event.pull_request?.head?.sha;
     if (!b) {
       // A gate that reads the check, not the comment, still sees that the fallback reviewed.
       if (outcome.fallbackModel) await titleCheck(deps, [outcome.sha, ...shas], title, outcome.note ?? "");
+      await publishCheck(deps, checkName, sha, "success", title, outcome.note ?? "");
       return 0;
     }
     if (outcome.overridden) {
       log.notice(`${b.title}. The \`${overrideLabel}\` label overrides it.`, b.title);
       await titleCheck(deps, [outcome.sha, ...shas], `${b.title} (overridden by the label)`, overrides);
+      await publishCheck(deps, checkName, sha, "success", `${b.title} (overridden by the label)`, overrides);
       return 0;
     }
     log.error(`${b.title}. ${way}`, b.title);
     await titleCheck(deps, [outcome.sha, ...shas], b.title, way);
+    await publishCheck(deps, checkName, sha, "failure", b.title, way);
     return 1;
   } catch (e) {
     setOutput("status", "failed");
@@ -836,11 +1094,13 @@ export async function main(deps: Deps = {}): Promise<number> {
     // The event's labels are known even when run() fails, so a crash still honours the override.
     if (mode !== "advisory" && (event.pull_request?.labels ?? []).some((l) => l.name === overrideLabel)) {
       log.notice(`${msg}\nThe \`${overrideLabel}\` label overrides the failure.`, title);
+      await publishCheck(deps, checkName, event.pull_request?.head?.sha, "success", `${title} (overridden by the label)`, msg.split("\n")[0]);
       return 0;
     }
     summary(`### ${title}\n\n${RETRY} ${mode === "advisory" ? "" : label}`.trim());
     log.error(msg, title);
     if (mode !== "advisory") await titleCheck(deps, shas, title, `${RETRY} ${label}`);
+    await publishCheck(deps, checkName, event.pull_request?.head?.sha, mode === "advisory" ? "success" : "failure", title, `${RETRY} ${label}`);
     return 1;
   }
 }
