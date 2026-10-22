@@ -46,6 +46,7 @@ describe("sync-after-minutes", () => {
     // 5 min, then 30 s for the canceling batch to end.
     assert.ok(ms >= 5.5 * MIN && ms < 6 * MIN, `went direct after ${ms} ms`);
     assert.deepEqual(w.cancels, ["msgbatch_1"]);
+    assert.equal(parseState(w.commentAtCancel[0])?.batch, undefined, "the comment says the run went direct before the cancel");
     assert.equal(w.syncs.length, 1);
     assert.equal(w.syncs[0].key, "k1");
     const { stream, ...params } = w.syncs[0].params;
@@ -217,6 +218,15 @@ describe("sync-after-minutes", () => {
     assert.match(w.comment, /Fallback review: the Anthropic API is overloaded/);
   });
 
+  it("hands the direct request to fallback-backend when the stream breaks off overloaded", async () => {
+    const w = slow();
+    w.streamError = "overloaded_error";
+    actionEnv(withFallback);
+    assert.equal(await run(w), 0);
+    assert.equal(w.chats.length, 1);
+    assert.match(w.comment, /Fallback review: the Anthropic API is overloaded/);
+  });
+
   it("retries a refusal directly on the fallback model", async () => {
     const w = slow();
     w.syncResult = (p) => (p.model === "claude-opus-5-5" ? refused() : succeeded(VERDICT_PASS, { model: "claude-opus-4-8" })).message as Record<string, unknown>;
@@ -233,11 +243,14 @@ describe("sync-after-minutes", () => {
     await run(w);
     now += 10 * MIN;
 
-    // While the label run waits, the review run cancels the batch and posts its direct review.
+    // While the label run waits, the review run says it goes direct, cancels the batch, and later posts its review.
     const posted = '<!-- claude-batch-review {"status":"done","verdict":"pass","sha":"head1","model":"claude-opus-5-5"} -->\n## Claude review';
+    let sleeps = 0;
     onSleep = () => {
-      Object.assign(w.batches[0], { canceled: true, ended: true });
-      w.comments[0].body = posted;
+      if (++sleeps === 1) {
+        w.comments[0].body = '<!-- claude-batch-review {"status":"pending","sha":"head1","model":"claude-opus-5-5"} -->\n## Claude review';
+        Object.assign(w.batches[0], { canceled: true, ended: true });
+      } else w.comments[0].body = posted;
     };
     w.result = (b) => (b.canceled ? { type: "canceled" } : succeeded(VERDICT_PASS));
     const out = actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" }, { action: "labeled", pull_request: { number: 1 } });

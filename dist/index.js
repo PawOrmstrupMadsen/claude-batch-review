@@ -21594,10 +21594,6 @@ ${foot}`
   const reviewSync = async (from) => {
     const why = `batch still queued after ${syncAfter}`;
     job = null;
-    await upsert(
-      { status: "pending", sha, model: from.model },
-      `${header(from.model)}\u23F3 Batch \`${from.batch}\` was still queued after ${syncAfter}, so it was canceled and this review goes to the Messages API directly. This comment becomes the review when the model answers.`
-    );
     let model = from.model;
     let slot = from.slot;
     for (; ; ) {
@@ -21622,6 +21618,10 @@ ${foot}`
   const cancelSlow = async (j) => {
     const client = slots[j.slot].client;
     log.notice(`Batch ${j.batch} still queued after ${syncAfter}; canceling it and reviewing through the Messages API directly.`);
+    await upsert(
+      { status: "pending", sha, model: j.model },
+      `${header(j.model)}\u23F3 Batch \`${j.batch}\` was still queued after ${syncAfter}, so it is canceled and this review goes to the Messages API directly. This comment becomes the review when the model answers.`
+    );
     try {
       const b = await client.messages.batches.cancel(j.batch);
       if (b.processing_status === "ended") return b;
@@ -21752,7 +21752,9 @@ var AnthropicDown = class extends Error {
 };
 function apiDown(e) {
   if (e instanceof Anthropic.APIConnectionError) return "the Anthropic API is unreachable";
-  if (!(e instanceof Anthropic.APIError) || e.status === void 0) return null;
+  if (!(e instanceof Anthropic.APIError)) return null;
+  if (e.status === void 0)
+    return e.type === "overloaded_error" ? "the Anthropic API is overloaded" : e.type === "api_error" ? "the Anthropic API failed" : null;
   if (e.status === 429) return "the Anthropic API is rate-limited";
   if (e.status === 529) return "the Anthropic API is overloaded";
   return e.status >= 500 ? `the Anthropic API failed (HTTP ${e.status})` : null;

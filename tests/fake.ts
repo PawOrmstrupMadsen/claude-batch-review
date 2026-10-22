@@ -56,6 +56,10 @@ export class World {
   cancel: "canceling" | "ends" | "settles" | "fails" = "canceling";
   /** Cancel requests, by batch id. */
   cancels: string[] = [];
+  /** The sticky comment as each cancel request found it. */
+  commentAtCancel: string[] = [];
+  /** A direct request's stream breaks off with this error event after it started. */
+  streamError = "";
   /** Batch creation requests per key, retries included. */
   creates: Record<string, number> = {};
   /** This commit's check runs, as the Checks API lists them. */
@@ -93,7 +97,7 @@ export class World {
     const p = url.pathname;
     if (method === "POST" && p === "/v1/messages") {
       this.syncs.push({ key, params: body! });
-      return keyError(this.syncKeys[key] ?? "ok") ?? stream(this.syncResult(body!));
+      return keyError(this.syncKeys[key] ?? "ok") ?? stream(this.syncResult(body!), this.streamError);
     }
     if (method === "POST" && p === "/v1/messages/batches") {
       const mode = this.keys[key] ?? "ok";
@@ -130,6 +134,7 @@ export class World {
     if (method === "POST" && m) {
       const b = this.batch(m[1]);
       this.cancels.push(b.id);
+      this.commentAtCancel.push(this.comment);
       if (this.cancel === "fails") return error(400, "invalid_request_error", "Batch cannot be canceled.");
       b.canceled = true;
       if (this.cancel === "ends") b.ended = true;
@@ -242,10 +247,11 @@ function keyError(mode: KeyMode): Response | null {
 }
 
 /** A Messages API answer as the server streams it (server-sent events). */
-function stream(msg: Json): Response {
+function stream(msg: Json, failWith = ""): Response {
   const usage = msg.usage as Json;
-  const events: Json[] = [
-    { type: "message_start", message: { ...msg, content: [], stop_reason: null, stop_details: null, usage: { ...usage, output_tokens: 1 } } },
+  const start = { type: "message_start", message: { ...msg, content: [], stop_reason: null, stop_details: null, usage: { ...usage, output_tokens: 1 } } };
+  const events: Json[] = failWith ? [start, { type: "error", error: { type: failWith, message: "Overloaded" } }] : [
+    start,
     ...(msg.content as Json[]).flatMap((block, index) => [
       { type: "content_block_start", index, content_block: { type: "text", text: "" } },
       { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } },
