@@ -483,7 +483,7 @@ describe("backend router: the gate's edges", () => {
     actionEnv(inputs(), { action: "labeled", pull_request: { number: 1, head: { sha: "head1" } } });
     w.comments = null as unknown as typeof w.comments;
     assert.equal(await run(), 1);
-    assert.ok(logs.some((l) => l.startsWith("::error title=No review: the job hit an error")), "it crashed");
+    assert.ok(logs.some((l) => l.startsWith("::error title=No review%3A the job hit an error")), "it crashed");
     assert.equal(w.createdChecks.length, 0);
   });
 
