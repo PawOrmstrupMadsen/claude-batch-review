@@ -17,7 +17,10 @@ export interface FakeBatch {
   createdAt: number;
 }
 
-type KeyMode = "ok" | "billing" | "auth" | "credit" | "spend-limit" | "spend-cap" | "rate-limit" | "overloaded" | "bad-request";
+type KeyMode = "ok" | "billing" | "auth" | "credit" | "spend-limit" | "spend-cap" | "rate-limit" | "overloaded" | "bad-request" | "over-budget";
+
+/** The LLM router in the tests: it serves the Anthropic API for the gateway's client tokens. */
+export const ROUTER = "http://router.test:8000";
 
 export const VERDICT_PASS = "**Verdict:** ✅ Looks good. Adds a thing.\n\n### Findings\nNo issues found.";
 export const VERDICT_CHANGES = "**Verdict:** ❌ Changes needed. Breaks a thing.\n\n### Findings\n1. **[high]** `a.ts:1` — bug";
@@ -29,7 +32,7 @@ export class World {
     body: "Adds a thing.",
     draft: false,
     html_url: "https://github.com/o/r/pull/1",
-    user: { login: "paw" },
+    user: { login: "paw", type: "User" },
     labels: [] as { name: string }[],
     base: { sha: "base1", ref: "main" },
     head: { sha: "head1", ref: "feat" },
@@ -68,6 +71,12 @@ export class World {
   pollsToEnd = 1;
   /** The batch result for a request; defaults to a passing review. */
   result: (b: FakeBatch) => Json = () => succeeded(VERDICT_PASS);
+  /** The gateway's client tokens; any other token gets 401 at the router. */
+  routerTokens = new Set(["rt"]);
+  /** Hosts the Anthropic API requests went to. */
+  apiHosts: string[] = [];
+  /** Check runs the action created (POST /check-runs). */
+  createdChecks: Json[] = [];
   /** Chat completion requests the `openai` backend sent. */
   chats: { url: string; headers: Record<string, string>; body: Json; timeoutMs: number }[] = [];
   /** How the chat endpoint answers, per request (0-based); defaults to a passing review. */
@@ -89,8 +98,13 @@ export class World {
     const method = (init?.method ?? "GET").toUpperCase();
     const headers = new Headers(init?.headers);
     const body = init?.body ? (JSON.parse(String(init.body)) as Json) : undefined;
-    if (url.host === "api.anthropic.com") return this.anthropic(url, method, headers.get("x-api-key") ?? "", body);
-    return this.github(url, method, body);
+    if (url.host === "api.anthropic.com" || url.origin === ROUTER) {
+      const key = headers.get("x-api-key") ?? "";
+      this.apiHosts.push(url.host);
+      if (url.origin === ROUTER && !this.routerTokens.has(key)) return error(401, "authentication_error", "Invalid token.");
+      return this.anthropic(url, method, key, body);
+    }
+    return this.github(url, method, body, headers);
   };
 
   private anthropic(url: URL, method: string, key: string, body?: Json): Response {
@@ -117,13 +131,13 @@ export class World {
         createdAt: Date.now(),
       };
       this.batches.push(b);
-      return json(batchObject(b));
+      return json(batchObject(b, url.origin));
     }
     let m = /^\/v1\/messages\/batches\/([^/]+)$/.exec(p);
     if (method === "GET" && m) {
       const b = this.batch(m[1]);
       if (++b.polls >= this.pollsToEnd) b.ended = true;
-      return json(batchObject(b));
+      return json(batchObject(b, url.origin));
     }
     m = /^\/v1\/messages\/batches\/([^/]+)\/results$/.exec(p);
     if (method === "GET" && m) {
@@ -139,7 +153,7 @@ export class World {
       b.canceled = true;
       if (this.cancel === "ends") b.ended = true;
       if (this.cancel === "settles") b.polls = this.pollsToEnd = 0;
-      return json(batchObject(b));
+      return json(batchObject(b, url.origin));
     }
     return error(404, "not_found_error", `${method} ${p}`);
   }
@@ -150,9 +164,15 @@ export class World {
     return b;
   }
 
-  private github(url: URL, method: string, body?: Json): Response {
+  private github(url: URL, method: string, body?: Json, headers = new Headers()): Response {
     const p = url.pathname.replace(/^\/repos\/o\/r/, "");
+    if (method === "GET" && p === "/pulls/1" && headers.get("accept")?.includes("diff"))
+      return new Response(this.files.map((f) => `diff --git a/${String(f.filename)} b/${String(f.filename)}\n${String(f.patch ?? "")}\n`).join(""), { status: 200 });
     if (method === "GET" && p === "/pulls/1") return json(this.pr);
+    if (method === "POST" && p === "/check-runs") {
+      this.createdChecks.push(body!);
+      return json({ id: 5000 + this.createdChecks.length, ...body }, 201);
+    }
     if (method === "GET" && p === "/pulls/1/files") return json(this.files);
     let m = /^\/git\/trees\/([^/]+)$/.exec(p);
     if (method === "GET" && m) {
@@ -243,6 +263,7 @@ function keyError(mode: KeyMode): Response | null {
   if (mode === "rate-limit") return error(429, "rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", { "retry-after-ms": "1" });
   if (mode === "overloaded") return error(529, "overloaded_error", "Overloaded", { "retry-after-ms": "1" });
   if (mode === "bad-request") return error(400, "invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum");
+  if (mode === "over-budget") return error(403, "permission_error", "Over budget. Try again next month or ask for local.");
   return null;
 }
 
@@ -264,7 +285,7 @@ function stream(msg: Json, failWith = ""): Response {
   return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
-function batchObject(b: FakeBatch): Json {
+function batchObject(b: FakeBatch, origin = "https://api.anthropic.com"): Json {
   return {
     id: b.id,
     type: "message_batch",
@@ -275,7 +296,7 @@ function batchObject(b: FakeBatch): Json {
     expires_at: new Date(b.createdAt + 86_400_000).toISOString(),
     cancel_initiated_at: null,
     archived_at: null,
-    results_url: b.ended ? `https://api.anthropic.com/v1/messages/batches/${b.id}/results` : null,
+    results_url: b.ended ? `${origin}/v1/messages/batches/${b.id}/results` : null,
   };
 }
 

@@ -6,8 +6,53 @@ branding:
   color: orange
 inputs:
   backend:
-    description: "anthropic: Claude through the Message Batches API. openai: one synchronous request to an OpenAI-compatible chat completions endpoint (`openai-base-url`, `openai-model`); no batch, no keys needed."
+    description: "anthropic: Claude through the Message Batches API. openai: one synchronous request to an OpenAI-compatible chat completions endpoint (`openai-base-url`, `openai-model`); no batch, no keys needed. router: through an LLM router and its gateway (`router-url`, `router-token`): a tier per pull request (`tier`), the local model by Claude Code over a checkout, or Sonnet or Opus by batch."
     default: anthropic
+  router-url:
+    description: "Backend router: the router's base URL (http://host:port). The batch and Messages API calls go there with `router-token`; the local engine asks it for `local-model`."
+    default: ''
+  router-token:
+    description: "Backend router: the gateway's client token for reviews. A 401 from the gateway ends as `No review: the review token is not set up`."
+    default: ''
+  tier:
+    description: "Backend router: auto applies the tier rules (README, \"Backend router\"); local, sonnet or opus forces that tier for one pass. A fork or pull_request_target run never gets local: it gets sonnet."
+    default: auto
+  sonnet-model:
+    description: "Backend router, tier sonnet: the model id sent to the gateway."
+    default: claude-sonnet-5-5
+  opus-model:
+    description: "Backend router, tier opus: the model id sent to the gateway."
+    default: claude-opus-5-5
+  local-model:
+    description: "Backend router, tier local: the model name the router sends to the local model servers."
+    default: local
+  second-opinion-label:
+    description: "Backend router: the label that gets both a local pass and an Opus pass; the stricter verdict counts."
+    default: needs 2nd opinion
+  opus-labels:
+    description: "Backend router: labels that get opus (comma or newline separated)."
+    default: security
+  opus-authors:
+    description: "Backend router: pull request authors (logins, comma or newline separated) whose pull requests get opus, such as a coding agent's machine user. Renovate's major updates get opus too."
+    default: ''
+  sonnet-floor-owners:
+    description: "Backend router: repository owners whose pull requests never get a review below sonnet (comma or newline separated)."
+    default: WhistleSafe
+  local-max-lines:
+    description: "Backend router: a pull request with at most this many changed lines (added plus deleted) goes local, outside sonnet-floor-owners."
+    default: '150'
+  local-timeout-minutes:
+    description: "Backend router, local engine: how long Claude Code may review, queue waits at the router included."
+    default: '60'
+  local-context-tokens:
+    description: "Backend router, local engine: the context window Claude Code compacts against."
+    default: '262144'
+  claude-code-version:
+    description: "Backend router, local engine: the Claude Code CLI version, installed into the runner's home when another one (or none) is there."
+    default: 2.1.263
+  check-name:
+    description: "The verdict as a check run of its own on the pull request's head (`success` on ✅, ⚠️ or the override label; `failure` otherwise, as `mode` decides: only `pass` fails on ❌), for a ruleset to require. Default `Review` with backend router, none otherwise. Needs `checks: write`."
+    default: ''
   api-keys:
     description: Anthropic API keys, one per line, used in order; a key that is out of credit, at a spend limit or refused is skipped. Lines starting with '#' are ignored. Backend anthropic only.
     default: ''
@@ -36,7 +81,7 @@ inputs:
     description: Model id (backend anthropic).
     default: claude-opus-5-5
   fallback-model:
-    description: Model the request is resubmitted to when the main model declines it (backend anthropic).
+    description: Model the request is resubmitted to when the main model declines it (backend anthropic; backend router retries on the other Claude tier).
     default: claude-opus-4-8
   effort:
     description: low, medium, high, xhigh or max (backend anthropic).
@@ -51,7 +96,7 @@ inputs:
     description: "How long the job waits for the batch (default 20); a later run for the same head commit resumes the pending batch. Backend openai: how long it waits for the answer (default 30)."
     default: ''
   sync-after-minutes:
-    description: "Backend anthropic: a batch still queued this many minutes after its submission is canceled and the same request goes to the Messages API directly (streamed, at full price) on the same key, then the next ones. A batch that ends with a succeeded result within 30 s of the cancel (its request may already be running) is used instead. A re-run that finds an older pending batch goes direct at once. Label-event runs never go direct. 0 turns it off."
+    description: "Backends anthropic and router: a batch still queued this many minutes after its submission is canceled and the same request goes to the Messages API directly (streamed, at full price) on the same key, then the next ones. A batch that ends with a succeeded result within 30 s of the cancel (its request may already be running) is used instead. A re-run that finds an older pending batch goes direct at once. Label-event runs never go direct. 0 turns it off."
     default: '5'
   prompt-file:
     description: Extra review instructions in the calling repo, read from the PR's base commit. `.github/claude-review.md` is always picked up when present.
