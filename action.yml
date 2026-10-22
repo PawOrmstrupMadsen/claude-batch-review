@@ -50,6 +50,9 @@ inputs:
   max-wait-minutes:
     description: "How long the job waits for the batch (default 20); a later run for the same head commit resumes the pending batch. Backend openai: how long it waits for the answer (default 30)."
     default: ''
+  sync-after-minutes:
+    description: "Backend anthropic: a batch still queued this many minutes after its submission is canceled and the same request goes to the Messages API directly (streamed, at full price) on the same key, then the next ones. A batch that ends while it is being canceled is used instead. A re-run that finds an older pending batch goes direct at once. Label-event runs never go direct. 0 turns it off."
+    default: '5'
   prompt-file:
     description: Extra review instructions in the calling repo, read from the PR's base commit. `.github/claude-review.md` is always picked up when present.
     default: ''

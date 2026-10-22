@@ -63,6 +63,8 @@ interface Job {
   slot: number;
   model: string;
   submitted: string;
+  /** When the batch was submitted (ms since the epoch); `sync-after-minutes` counts from it. */
+  started: number;
 }
 
 interface Comment {
@@ -114,6 +116,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     maxOutputTokens: num("max-output-tokens", 32000),
     maxInputTokens: num("max-input-tokens", 300000),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 60_000,
+    syncAfterMinutes: num("sync-after-minutes", 5, true),
     promptFile: input("prompt-file"),
     reasoningEffort: input("openai-reasoning-effort"),
     force: input("force") === "true",
@@ -142,7 +145,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
 
   const sha7 = sha.slice(0, 7);
 
-  let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
+  const author = input("comment-author", "github-actions[bot]");
+  let comment = await findComment(gh, prNumber, author);
   const prior = comment ? parseState(comment.body) : null;
   let job: Job | null = null;
 
@@ -169,7 +173,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
     if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
-      job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted: prior.submitted ?? "" };
+      const submitted = prior.submitted ?? "";
+      job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted, started: Date.parse(submitted) || Date.now() };
       log.info(`Resuming batch ${job.batch} for ${sha7}.`);
     } else if (slot >= 0) {
       await slots[slot].client.messages.batches.cancel(prior.batch).then(
@@ -182,9 +187,10 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   let ctx: ReviewContext | null = null;
   const context = async () => (ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile));
 
-  const submit = async (from: number, model: string): Promise<Job | null> => {
+  /** The one request a review sends, as a batch request or a direct Messages API call. */
+  const request = async (model: string): Promise<Anthropic.Messages.MessageCreateParamsNonStreaming> => {
     const c = await context();
-    const params: Anthropic.Messages.MessageCreateParamsNonStreaming = {
+    return {
       model,
       max_tokens: cfg.maxOutputTokens,
       thinking: { type: "adaptive" },
@@ -196,32 +202,46 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       ],
       messages: [{ role: "user", content: c.text }],
     };
-    let down: AnthropicDown | null = null;
+  };
+
+  /**
+   * Makes `call` on key `from`, moving on to the next key when one is unusable or rate-limited.
+   * Null when no key can be used; an AnthropicDown when the API cannot serve and a fallback can.
+   */
+  const onKeys = async <T>(from: number, call: (s: Slot) => Promise<T>): Promise<{ value: T; slot: number } | null> => {
+    let limited: unknown = null;
+    const raise = (e: unknown): never => {
+      const why = canFallBack ? apiDown(e) : null;
+      throw why ? new AnthropicDown(why, e instanceof Error ? e.message : String(e)) : e;
+    };
     for (let i = from; i < slots.length; i++) {
       try {
-        const batch = await slots[i].client.messages.batches.create({
-          requests: [{ custom_id: `${owner}-${repo}-${prNumber}-${sha7}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64), params }],
-        });
-        log.info(`Submitted ${batch.id} on key ${i + 1}/${slots.length} (${model}).`);
-        return { batch: batch.id, slot: i, model, submitted: batch.created_at };
+        return { value: await call(slots[i]), slot: i };
       } catch (e) {
         if (e instanceof Anthropic.APIError && keyUnusable(e.status, e.type, e.message)) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} — ${e.message}`);
           continue;
         }
-        const why = canFallBack ? apiDown(e) : null;
-        if (!why) throw e;
-        down = new AnthropicDown(why, e instanceof Error ? e.message : String(e));
         // Rate limits are per organisation, and the next key may belong to another one.
         if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
+          limited = e;
           continue;
         }
-        throw down;
+        raise(e);
       }
     }
-    if (down) throw down;
+    if (limited) raise(limited);
     return null;
+  };
+
+  const submit = async (from: number, model: string): Promise<Job | null> => {
+    const params = await request(model);
+    const custom_id = `${owner}-${repo}-${prNumber}-${sha7}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64);
+    const r = await onKeys(from, (s) => s.client.messages.batches.create({ requests: [{ custom_id, params }] }));
+    if (!r) return null;
+    log.info(`Submitted ${r.value.id} on key ${r.slot + 1}/${slots.length} (${model}).`);
+    return { batch: r.value.id, slot: r.slot, model, submitted: r.value.created_at, started: Date.now() };
   };
 
   const upsert = async (state: State, body: string) => {
@@ -324,6 +344,103 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
   /** Whose comment a crash rewrites: the fallback's once it runs. */
   let running = { model: cfg.model, local: openai };
 
+  /** Posts a finished Claude answer, from a batch or a direct call, as the review. */
+  const postReview = async (msg: Anthropic.Messages.Message, foot: string, via: string): Promise<Outcome> => {
+    const text = msg.content
+      .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n\n")
+      .trim();
+    const truncated = msg.stop_reason === "max_tokens" ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
+    const verdict = parseVerdict(text);
+    const bad = unusable(text, verdict);
+    await upsert(
+      { status: "done", verdict, sha, model: msg.model },
+      `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}\n\n${foot}`,
+    );
+    log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the ${via}.` };
+  };
+
+  const syncAfter = `${cfg.syncAfterMinutes} min`;
+  /**
+   * The batch sat in the queue past `sync-after-minutes`: ask the Messages API directly instead,
+   * at full price, on the key that submitted the batch (then the next ones).
+   */
+  const reviewSync = async (from: Job): Promise<Outcome> => {
+    const why = `batch still queued after ${syncAfter}`;
+    // The batch is canceled: a crash from here on leaves nothing to resume, and a re-run reviews afresh.
+    job = null;
+    await upsert(
+      { status: "pending", sha, model: from.model },
+      `${header(from.model)}⏳ Batch \`${from.batch}\` was still queued after ${syncAfter}, so it was canceled and this review goes to the Messages API directly. This comment becomes the review when the model answers.`,
+    );
+    let model = from.model;
+    let slot = from.slot;
+    for (;;) {
+      const params = await request(model);
+      const t0 = Date.now();
+      // Streamed: a request with this many output tokens may run longer than a plain request may.
+      const r = await onKeys(slot, (s) => s.client.messages.stream(params).finalMessage());
+      if (!r) return outOfCredit(model, keysWhy);
+      const msg = r.value;
+      slot = r.slot;
+      log.info(`Direct request on key ${slot + 1}/${slots.length} (${model}) answered in ${Math.round((Date.now() - t0) / 1000)} s.`);
+      if (msg.stop_reason === "refusal" && model !== cfg.fallbackModel) {
+        log.warning(`${model} declined (${msg.stop_details?.category ?? "no category"}); retrying on ${cfg.fallbackModel}.`);
+        model = cfg.fallbackModel;
+        continue;
+      }
+      if (msg.stop_reason === "refusal")
+        return fail(model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`, "the model declined to review this PR");
+      const foot = syncFooter(msg, why, Math.round((Date.now() - t0) / 1000), slot, slots.length, await context());
+      return postReview(msg, foot, `Messages API directly (${why})`);
+    }
+  };
+
+  /**
+   * Cancels a batch that is still queued. The batch it returns has ended after all (it finished before
+   * the cancel reached it), so its result is used instead of paying again; null otherwise.
+   */
+  const cancelSlow = async (j: Job): Promise<Anthropic.Messages.MessageBatch | null> => {
+    const client = slots[j.slot].client;
+    log.notice(`Batch ${j.batch} still queued after ${syncAfter}; canceling it and reviewing through the Messages API directly.`);
+    try {
+      const b = await client.messages.batches.cancel(j.batch);
+      return b.processing_status === "ended" ? b : null;
+    } catch (e) {
+      log.warning(`Could not cancel ${j.batch}: ${e instanceof Error ? e.message : String(e)}`);
+      // Canceling an ended batch fails too: look once more before paying for a direct request.
+      const b = await client.messages.batches.retrieve(j.batch).catch(() => null);
+      return b?.processing_status === "ended" ? b : null;
+    }
+  };
+
+  /**
+   * Another run canceled this batch: the run for a newer commit, or the review run that went to the
+   * Messages API directly. Waits for that run's review instead of writing over its comment; null when
+   * the comment still names this batch, so nobody else took over.
+   */
+  const reviewedElsewhere = async (batch: string, deadline: number): Promise<Outcome | null> => {
+    for (;;) {
+      const c = await findComment(gh, prNumber, author);
+      const s = c ? parseState(c.body) : null;
+      if (!c || !s || (s.sha === sha && s.status === "pending" && s.batch === batch)) return null;
+      comment = c;
+      if (s.sha !== sha) return { status: "failed", overridden, sha, reason: `the review moved on to ${s.sha.slice(0, 7)}`, next: "Re-run the review job for the last push." };
+      if (s.status === "done") {
+        const verdict = s.verdict ?? parseVerdict(c.body);
+        log.info(`Batch ${batch} was canceled by another run, which reviewed ${sha7}.`);
+        return { status: "done", verdict, overridden, sha, ...(verdict === "unknown" ? { reason: NO_VERDICT } : {}), note: `Review of ${sha7} by another run.` };
+      }
+      if (s.status === "failed") return { status: "failed", overridden, sha, reason: "the last attempt failed", next: RETRY };
+      if (Date.now() >= deadline)
+        return { status: "pending", overridden, sha, reason: "another run is still reviewing", next: "Re-run this job to collect the review." };
+      log.info(`Batch ${batch} was canceled by another run; waiting for its review.`);
+      await sleep(15_000);
+    }
+  };
+
   const reviewAnthropic = async (): Promise<Outcome> => {
     if (!job) {
       job = await submit(0, cfg.model);
@@ -334,13 +451,24 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     const deadline = Date.now() + cfg.maxWaitMs;
     for (let round = 0; round < slots.length + 3; round++) {
       const client = slots[job.slot].client;
-      const batch = await waitForBatch(client, job.batch, deadline, sleep);
+      // A label run never pays: it leaves the direct request to the review run, which waits for the same batch.
+      const syncAt = cfg.syncAfterMinutes && !labelEvent ? job.started + cfg.syncAfterMinutes * 60_000 : Number.POSITIVE_INFINITY;
+      let batch = await waitForBatch(client, job.batch, Math.min(deadline, syncAt), sleep);
+      // Set when the batch ended while being canceled: only a succeeded result spares the direct request.
+      let raced = false;
+      if (!batch && syncAt <= deadline) {
+        batch = await cancelSlow(job);
+        if (!batch) return reviewSync(job);
+        raced = true;
+        log.info(`Batch ${job.batch} ended before the cancel reached it; collecting its result.`);
+      }
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 60_000} min; re-run the workflow to collect it.`);
         return { status: "pending", overridden, sha, reason: `batch still running after ${cfg.maxWaitMs / 60_000} min`, next: "Re-run this job to collect it." };
       }
       let result: Anthropic.Messages.MessageBatchResult | null = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
+      if (raced && result?.type !== "succeeded") return reviewSync(job);
       if (!result) return fail(job.model, `batch \`${job.batch}\` ended without a result.`, "the batch ended without a result");
 
       if (result.type === "succeeded") {
@@ -354,20 +482,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
         }
         if (msg.stop_reason === "refusal")
           return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`, "the model declined to review this PR");
-        const text = msg.content
-          .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n\n")
-          .trim();
-        const truncated = msg.stop_reason === "max_tokens" ? "\n\n> ⚠️ Cut off at `max-output-tokens`." : "";
-        const verdict = parseVerdict(text);
-        const bad = unusable(text, verdict);
-        await upsert(
-          { status: "done", verdict, sha, model: msg.model },
-          `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}\n\n${footer(msg, job, batch, slots.length, await context())}`,
-        );
-        log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
-        return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the Message Batches API.` };
+        return postReview(msg, footer(msg, job, batch, slots.length, await context()), "Message Batches API");
       }
 
       if (result.type === "errored") {
@@ -380,6 +495,10 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
           continue;
         }
         return fail(job.model, `the batch request failed: \`${err.type}\` ${err.message}`, "the batch request failed");
+      }
+      if (result.type === "canceled") {
+        const other = await reviewedElsewhere(job.batch, deadline);
+        if (other) return other;
       }
       return fail(job.model, `batch \`${job.batch}\` ended as \`${result.type}\`. Re-run the workflow to try again.`, `the batch ended as ${result.type}`);
     }
@@ -456,10 +575,10 @@ export function parseVerdict(text: string): Verdict {
   return !m ? "unknown" : m[1] === "✅" ? "pass" : m[1] === "❌" ? "changes" : "minor";
 }
 
-function num(name: string, fallback: number): number {
+function num(name: string, fallback: number, zero = false): number {
   const raw = input(name, String(fallback));
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`Input ${name} must be a positive number, got "${raw}".`);
+  if (!Number.isFinite(n) || n < 0 || (n === 0 && !zero)) throw new Error(`Input ${name} must be a ${zero ? "non-negative" : "positive"} number, got "${raw}".`);
   return n;
 }
 
@@ -478,9 +597,10 @@ async function waitForBatch(client: Anthropic, id: string, deadline: number, sle
   for (let i = 0; ; i++) {
     const batch = await client.messages.batches.retrieve(id);
     if (batch.processing_status === "ended") return batch;
-    if (Date.now() > deadline) return null;
+    if (Date.now() >= deadline) return null;
     if (i % 4 === 0) log.info(`Batch ${id}: ${batch.processing_status}…`);
-    await sleep(i < 8 ? 15_000 : 30_000);
+    // Never sleeps far past the deadline, so `sync-after-minutes` is kept to the second.
+    await sleep(Math.min(i < 8 ? 15_000 : 30_000, Math.max(1_000, deadline - Date.now())));
   }
 }
 
@@ -499,6 +619,18 @@ function footer(
   return (
     `---\n<sub>Message Batches API · ${ctx.files} files · ${input.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost}` +
     ` · batch took ${duration(waited)} · key ${job.slot + 1}/${keyCount} · ${LINK}</sub>${omittedList(ctx)}`
+  );
+}
+
+/** The footer of a review the Messages API gave directly, at full price, because the batch was slow. */
+function syncFooter(msg: Anthropic.Messages.Message, why: string, seconds: number, slot: number, keyCount: number, ctx: ReviewContext): string {
+  const u = msg.usage;
+  const input = u.input_tokens + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  const price = PRICES[msg.model];
+  const cost = price ? ` · ≈ $${((input * price[0] + u.output_tokens * price[1]) / 1e6).toFixed(3)} (full price)` : "";
+  return (
+    `---\n<sub>Messages API, synchronous: ${why} · ${ctx.files} files · ${input.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost}` +
+    ` · took ${duration(seconds)} · key ${slot + 1}/${keyCount} · ${LINK}</sub>${omittedList(ctx)}`
   );
 }
 

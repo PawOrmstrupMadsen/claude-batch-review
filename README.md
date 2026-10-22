@@ -46,11 +46,33 @@ reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the wor
 Inputs (`with:`): `backend` (`anthropic`), `api-keys` (backend `anthropic`), `fallback-backend` (empty),
 `openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key` (backend or fallback `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
-`max-wait-minutes` (`20`; `30` for `openai`), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
+`max-wait-minutes` (`20`; `30` for `openai`), `sync-after-minutes` (`5`; `0` turns it off), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
 `pr`, `github-token`, `comment-author`. Outputs: `status` = `done`, `pending`, `failed` or `skipped`;
 `verdict` = `pass`, `minor`, `changes` or `unknown`. Full descriptions are in [`action.yml`](action.yml).
 
 Repo-specific review rules go in `.github/claude-review.md` (or the file named by `prompt-file`).
+
+## Slow batches
+
+Batches here usually end in 2 to 4 minutes, but the queue can stall a batch for hours. A batch still
+queued `sync-after-minutes` (default 5) after its submission is canceled, and the same request goes to the
+Messages API directly, streamed: one review at full price instead of a gate that blocks for hours.
+
+- It uses the key that submitted the batch and moves on to the next key exactly as a submission does (no
+  credit, a spend limit, a refused key, a rate limit), falling back as `fallback-backend` says when none can.
+- If the batch ends while it is being canceled (the cancel answers with an ended batch, or the cancel fails
+  and the batch has ended), its succeeded result is used and nothing is paid twice; any other result goes
+  direct. A failed cancel is logged and the request goes direct anyway.
+- The answer is used as a batch result is (verdict, sticky comment, check title, refusal retry on
+  `fallback-model`, sent directly too), and the footer reads `Messages API, synchronous: batch still queued
+  after 5 min` with the full-price cost.
+- A re-run that finds a pending batch older than `sync-after-minutes` collects it when it has ended, and
+  otherwise cancels it and goes direct at once. With `max-wait-minutes` below `sync-after-minutes`, the wait
+  runs out first and the next run goes direct.
+- A label-event run never goes direct: it waits for the batch, and when the review run canceled it, takes
+  that run's review from the comment instead of writing over it.
+
+`sync-after-minutes: 0` waits for the batch for the whole of `max-wait-minutes`, as before.
 
 ## OpenAI-compatible backend
 
@@ -143,7 +165,7 @@ re-pins everything to an existing release.
 `ANTHROPIC_REVIEW_KEYS` holds one Anthropic API key per line; `#` lines are ignored. The action tries them
 in order: a key that answers with `billing_error` (no credit), an empty balance, a spend limit or spend cap,
 `authentication_error` or `permission_error` is skipped, and a batch whose request fails for lack of credit is resubmitted on the
-next key. Put the key you want drained first at the top. When every key is empty, the comment says so.
+next key. A key still rate-limited after the SDK's retries hands the request to the next key. Put the key you want drained first at the top. When every key is empty, the comment says so.
 
 The list lives in `~/.config/claude-review/keys` on the desktop (mode 600). After adding or removing a
 key there, push it everywhere with:
@@ -170,7 +192,8 @@ not reach private repos. Run it again after creating a repo.
 3. Submits a one-request batch (adaptive thinking, `effort: high`) and writes a "queued" comment holding
    the batch id, the head SHA and a fingerprint of the key (first 8 hex of its SHA-256, never the key).
 4. Polls until the batch ends or `max-wait-minutes` passes. A run that finds a pending batch for the same
-   head commit resumes it instead of paying twice; a run for a newer commit cancels the older batch.
+   head commit resumes it instead of paying twice; a run for a newer commit cancels the older batch. A
+   batch still queued after `sync-after-minutes` is canceled and sent directly ([Slow batches](#slow-batches)).
 5. Posts the review with token counts and the batch cost. If the model declines (`stop_reason:
    refusal`), the request is resubmitted once on `fallback-model`: the server-side `fallbacks` parameter
    is not accepted by the Batches API.

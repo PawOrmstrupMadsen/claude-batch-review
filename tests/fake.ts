@@ -13,7 +13,11 @@ export interface FakeBatch {
   ended: boolean;
   canceled: boolean;
   params: Json;
+  /** Date.now() at creation, so a mocked clock moves the batch's timestamps too. */
+  createdAt: number;
 }
+
+type KeyMode = "ok" | "billing" | "auth" | "credit" | "spend-limit" | "spend-cap" | "rate-limit" | "overloaded" | "bad-request";
 
 export const VERDICT_PASS = "**Verdict:** ✅ Looks good. Adds a thing.\n\n### Findings\nNo issues found.";
 export const VERDICT_CHANGES = "**Verdict:** ❌ Changes needed. Breaks a thing.\n\n### Findings\n1. **[high]** `a.ts:1` — bug";
@@ -41,7 +45,17 @@ export class World {
   failingPaths = new Set<string>();
   batches: FakeBatch[] = [];
   /** Per API key: how batch creation answers. */
-  keys: Record<string, "ok" | "billing" | "auth" | "credit" | "spend-limit" | "spend-cap" | "rate-limit" | "overloaded" | "bad-request"> = {};
+  keys: Record<string, KeyMode> = {};
+  /** Per API key: how a direct (synchronous) Messages API request answers. */
+  syncKeys: Record<string, KeyMode> = {};
+  /** Direct Messages API requests, per key, with their params. */
+  syncs: { key: string; params: Json }[] = [];
+  /** The message a direct request streams back; defaults to a passing review. */
+  syncResult: (params: Json) => Json = () => succeeded(VERDICT_PASS).message as Json;
+  /** How a cancel answers: canceling, the batch ended just before the cancel landed, or an error. */
+  cancel: "canceling" | "ends" | "fails" = "canceling";
+  /** Cancel requests, by batch id. */
+  cancels: string[] = [];
   /** Batch creation requests per key, retries included. */
   creates: Record<string, number> = {};
   /** This commit's check runs, as the Checks API lists them. */
@@ -77,23 +91,27 @@ export class World {
 
   private anthropic(url: URL, method: string, key: string, body?: Json): Response {
     const p = url.pathname;
+    if (method === "POST" && p === "/v1/messages") {
+      this.syncs.push({ key, params: body! });
+      return keyError(this.syncKeys[key] ?? "ok") ?? stream(this.syncResult(body!));
+    }
     if (method === "POST" && p === "/v1/messages/batches") {
       const mode = this.keys[key] ?? "ok";
       this.creates[key] = (this.creates[key] ?? 0) + 1;
-      if (mode === "billing") return error(402, "billing_error", "Your credit balance is too low to access the Anthropic API.");
-      if (mode === "auth") return error(401, "authentication_error", "invalid x-api-key");
-      if (mode === "credit") return error(400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.");
-      if (mode === "spend-limit")
-        return error(400, "invalid_request_error", "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.");
-      // No retry-after: the SDK backs off for seconds; x-should-retry keeps the test fast.
-      if (mode === "spend-cap")
-        return error(429, "rate_limit_error", "You have reached your API usage limits: your organization has crossed its monthly API usage threshold.", { "x-should-retry": "false" });
-      if (mode === "rate-limit") return error(429, "rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", { "retry-after-ms": "1" });
-      if (mode === "overloaded") return error(529, "overloaded_error", "Overloaded", { "retry-after-ms": "1" });
-      if (mode === "bad-request") return error(400, "invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum");
+      const refused = keyError(mode);
+      if (refused) return refused;
       const req = (body!.requests as Json[])[0];
       const params = req.params as Json;
-      const b: FakeBatch = { id: `msgbatch_${this.batches.length + 1}`, key, model: String(params.model), polls: 0, ended: false, canceled: false, params };
+      const b: FakeBatch = {
+        id: `msgbatch_${this.batches.length + 1}`,
+        key,
+        model: String(params.model),
+        polls: 0,
+        ended: false,
+        canceled: false,
+        params,
+        createdAt: Date.now(),
+      };
       this.batches.push(b);
       return json(batchObject(b));
     }
@@ -111,7 +129,10 @@ export class World {
     m = /^\/v1\/messages\/batches\/([^/]+)\/cancel$/.exec(p);
     if (method === "POST" && m) {
       const b = this.batch(m[1]);
+      this.cancels.push(b.id);
+      if (this.cancel === "fails") return error(400, "invalid_request_error", "Batch cannot be canceled.");
       b.canceled = true;
+      if (this.cancel === "ends") b.ended = true;
       return json(batchObject(b));
     }
     return error(404, "not_found_error", `${method} ${p}`);
@@ -203,15 +224,48 @@ export function erroredBilling(): Json {
   return { type: "errored", error: { type: "error", error: { type: "billing_error", message: "Your credit balance is too low" } } };
 }
 
+/** How the API refuses a request on a key in this mode; null when the key is fine. */
+function keyError(mode: KeyMode): Response | null {
+  if (mode === "billing") return error(402, "billing_error", "Your credit balance is too low to access the Anthropic API.");
+  if (mode === "auth") return error(401, "authentication_error", "invalid x-api-key");
+  if (mode === "credit") return error(400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.");
+  if (mode === "spend-limit")
+    return error(400, "invalid_request_error", "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.");
+  // No retry-after: the SDK backs off for seconds; x-should-retry keeps the test fast.
+  if (mode === "spend-cap")
+    return error(429, "rate_limit_error", "You have reached your API usage limits: your organization has crossed its monthly API usage threshold.", { "x-should-retry": "false" });
+  if (mode === "rate-limit") return error(429, "rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", { "retry-after-ms": "1" });
+  if (mode === "overloaded") return error(529, "overloaded_error", "Overloaded", { "retry-after-ms": "1" });
+  if (mode === "bad-request") return error(400, "invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum");
+  return null;
+}
+
+/** A Messages API answer as the server streams it (server-sent events). */
+function stream(msg: Json): Response {
+  const usage = msg.usage as Json;
+  const events: Json[] = [
+    { type: "message_start", message: { ...msg, content: [], stop_reason: null, stop_details: null, usage: { ...usage, output_tokens: 1 } } },
+    ...(msg.content as Json[]).flatMap((block, index) => [
+      { type: "content_block_start", index, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } },
+      { type: "content_block_stop", index },
+    ]),
+    { type: "message_delta", delta: { stop_reason: msg.stop_reason, stop_details: msg.stop_details, stop_sequence: null }, usage: { output_tokens: usage.output_tokens } },
+    { type: "message_stop" },
+  ];
+  const text = events.map((e) => `event: ${String(e.type)}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 function batchObject(b: FakeBatch): Json {
   return {
     id: b.id,
     type: "message_batch",
-    processing_status: b.canceled ? "canceling" : b.ended ? "ended" : "in_progress",
+    processing_status: b.ended ? "ended" : b.canceled ? "canceling" : "in_progress",
     request_counts: { processing: b.ended ? 0 : 1, succeeded: b.ended ? 1 : 0, errored: 0, canceled: 0, expired: 0 },
-    created_at: "2026-10-14T10:00:00Z",
-    ended_at: b.ended ? "2026-10-14T10:03:00Z" : null,
-    expires_at: "2026-10-15T10:00:00Z",
+    created_at: new Date(b.createdAt).toISOString(),
+    ended_at: b.ended ? new Date(b.createdAt + 180_000).toISOString() : null,
+    expires_at: new Date(b.createdAt + 86_400_000).toISOString(),
     cancel_initiated_at: null,
     archived_at: null,
     results_url: b.ended ? `https://api.anthropic.com/v1/messages/batches/${b.id}/results` : null,

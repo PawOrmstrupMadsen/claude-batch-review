@@ -196,12 +196,12 @@ describe("main", () => {
     const realNow = Date.now;
     Date.now = () => now;
     try {
-      actionEnv({ "api-keys": "k1", "max-wait-minutes": "" });
+      actionEnv({ "api-keys": "k1", "max-wait-minutes": "", "sync-after-minutes": "0" });
       await main({ fetch: w.fetch, sleep: async (ms) => void (now += ms) });
     } finally {
       Date.now = realNow;
     }
-    assert.ok(now > 20 * 60_000 && now < 21 * 60_000, `waited ${now} ms`);
+    assert.ok(now >= 20 * 60_000 && now < 21 * 60_000, `waited ${now} ms`);
   });
 
   it("rejects an unknown mode", async () => {
