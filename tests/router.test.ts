@@ -349,6 +349,7 @@ describe("backend router: second opinion", () => {
     actionEnv(inputs(), { action: "labeled", pull_request: { number: 1 } });
     assert.equal(await run(), 1);
     assert.equal(calls.length + w.batches.length, 0);
+    assert.equal(w.createdChecks.length, 0, "it leaves the check to the review run");
   });
 });
 

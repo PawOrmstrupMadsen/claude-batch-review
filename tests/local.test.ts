@@ -69,10 +69,15 @@ describe("scrub", () => {
     mkdirSync(join(d, "a", ".claude"), { recursive: true });
     mkdirSync(join(d, ".claude"));
     mkdirSync(join(d, ".git"));
-    for (const f of ["CLAUDE.md", "a/AGENTS.md", "a/CLAUDE.local.md", ".mcp.json", "a/.claude/x.json", "a/b.ts", ".git/CLAUDE.md"]) writeFileSync(join(d, f), "x");
+    mkdirSync(join(d, ".github", ".claude"), { recursive: true });
+    for (const f of ["CLAUDE.md", "a/AGENTS.md", "a/CLAUDE.local.md", ".mcp.json", "a/.claude/x.json", "a/b.ts", ".git/CLAUDE.md", ".github/CLAUDE.md", ".github/.claude/x.json"])
+      writeFileSync(join(d, f), "x");
     symlinkSync("/etc/hostname", join(d, "a", "link"));
+    symlinkSync("/etc/hostname", join(d, ".github", "link"));
     scrub(d);
     assert.throws(() => lstatSync(join(d, "a", "link")), "symbolic links go");
+    assert.throws(() => lstatSync(join(d, ".github", "link")), "under .github/ too");
+    assert.ok(!existsSync(join(d, ".github", "CLAUDE.md")) && !existsSync(join(d, ".github", ".claude")), ".github/ is no .git/");
     assert.deepEqual(
       ["CLAUDE.md", "a/AGENTS.md", "a/CLAUDE.local.md", ".mcp.json", "a/.claude", ".claude", "a/b.ts", ".git/CLAUDE.md"].map((f) => existsSync(join(d, f))),
       [false, false, false, false, false, false, true, true],

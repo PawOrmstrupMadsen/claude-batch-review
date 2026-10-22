@@ -95,6 +95,8 @@ export interface Outcome {
   fallbackModel?: string;
   /** Backend router: why this pull request needs no review (a bot's), which passes the gate. */
   exempt?: string;
+  /** A label run that decided nothing: it leaves the `check-name` check to the review run. */
+  undecided?: boolean;
   sha?: string;
 }
 
@@ -229,6 +231,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
       sha,
       reason: failed ? "the last attempt failed" : `${sha7} has none yet`,
       next: "Re-run the review job for the last push.",
+      undecided: true,
     };
   }
   if (!openai && prior?.status === "pending" && prior.batch) {
@@ -1085,7 +1088,8 @@ export async function main(deps: Deps = {}): Promise<number> {
     }
     log.error(`${b.title}. ${way}`, b.title);
     await titleCheck(deps, [outcome.sha, ...shas], b.title, way);
-    await publishCheck(deps, checkName, sha, "failure", b.title, way);
+    // A finished review run may post its verdict any moment: a label run that knows none never writes over it.
+    if (!outcome.undecided) await publishCheck(deps, checkName, sha, "failure", b.title, way);
     return 1;
   } catch (e) {
     setOutput("status", "failed");

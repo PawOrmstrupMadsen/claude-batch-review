@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { Pull } from "./context.js";
 import { log } from "./github.js";
 import { REVIEW_SHAPE } from "./prompt.js";
@@ -118,6 +118,9 @@ export async function localReview(o: LocalOptions, deps: { runClaude?: RunClaude
       prDir,
       "--allowedTools",
       "Read,Glob,Grep",
+      // Removed outright, not only left unapproved.
+      "--disallowedTools",
+      "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task",
     ];
     log.info(`Reviewing with ${o.model} through the router (Claude Code, read-only, up to ${Math.round(o.timeoutMs / 60_000)} min).`);
     const t0 = Date.now();
@@ -152,10 +155,11 @@ export function parseResult(r: ClaudeRun, ms: number): LocalResult {
 /** The pull request may not configure its own reviewer: hooks, MCP servers, instruction files and symbolic links go. */
 export function scrub(dir: string): void {
   for (const name of [".claude", ".mcp.json"]) rmSync(join(dir, name), { recursive: true, force: true });
+  const gitDir = join(dir, ".git");
   const entries = readdirSync(dir, { recursive: true, withFileTypes: true });
   for (const e of entries) {
     const path = join(e.parentPath, e.name);
-    if (path.startsWith(join(dir, ".git"))) continue;
+    if (path === gitDir || path.startsWith(gitDir + sep)) continue;
     // A link could lead the reviewer's Read past the denies, to the runner's credentials.
     if (e.isSymbolicLink()) rmSync(path, { force: true });
     else if (e.isDirectory() && e.name === ".claude") rmSync(path, { recursive: true, force: true });

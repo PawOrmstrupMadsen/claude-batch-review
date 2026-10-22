@@ -214,8 +214,10 @@ effect at the next push, or a re-run with *force*.
   `success` on ✅, ⚠️ or the override label, `failure` on ❌ or no review. Rulesets require that check, so the
   job itself can have any other name, and a `pull_request_target` run still reports on the head commit.
 - A bot's pull request (author type `Bot`) is not reviewed, except Renovate's major updates and `opus-authors`:
-  the check is `neutral`, which passes a required check as a skipped job does. Drafts stay with the workflow's
-  `if:`.
+  the check is `neutral`, which passes a required check as a skipped job does. A coding agent that runs as a
+  GitHub App (type `Bot`) therefore passes unreviewed until the repository lists it in `opus-authors`. Drafts
+  stay with the workflow's `if:`. A label-event run that finds no review of the head commit writes no check:
+  the review run's verdict stands.
 - `401` from the gateway: `No review: the review token is not set up`, as is an empty `router-token`.
 - `403` on a batch (the review client is over its budget): the local model reviews instead, and the comment
   says so; where no checkout is allowed, `No review: over the review budget`. The next round tries Claude again.

@@ -11,5 +11,5 @@ through an LLM router (`backend: router`: a tier per PR, the local model by read
 - Public repo: no keys, hostnames, LAN details or private repo names in it. Keys live only in the
   `ANTHROPIC_REVIEW_KEYS` secrets and `~/.config/claude-review/keys` on the desktop.
 - Keep the one-shot model tool-less, the local engine read-only over a scrubbed checkout that only same-repo
-  `pull_request` runs make, and the guidance read from the base commit (README, "How it works", "Backend router").
+  `pull_request` and `workflow_dispatch` runs make, and the guidance read from the base commit (README, "How it works", "Backend router").
 - PRs into `main`, squash-merged, `Closes #N`.

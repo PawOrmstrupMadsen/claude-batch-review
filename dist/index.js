@@ -21187,7 +21187,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { dirname as dirname2, join as join2, sep } from "node:path";
 
 // src/prompt.ts
 var REVIEW_SHAPE = `Reply in GitHub-flavoured Markdown, exactly in this shape:
@@ -21287,7 +21287,10 @@ ${o.guidance || "(The repository has no guidance files.)"}`);
       "--add-dir",
       prDir,
       "--allowedTools",
-      "Read,Glob,Grep"
+      "Read,Glob,Grep",
+      // Removed outright, not only left unapproved.
+      "--disallowedTools",
+      "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task"
     ];
     log.info(`Reviewing with ${o.model} through the router (Claude Code, read-only, up to ${Math.round(o.timeoutMs / 6e4)} min).`);
     const t0 = Date.now();
@@ -21317,10 +21320,11 @@ function parseResult(r, ms) {
 }
 function scrub(dir) {
   for (const name of [".claude", ".mcp.json"]) rmSync(join2(dir, name), { recursive: true, force: true });
+  const gitDir = join2(dir, ".git");
   const entries = readdirSync(dir, { recursive: true, withFileTypes: true });
   for (const e of entries) {
     const path4 = join2(e.parentPath, e.name);
-    if (path4.startsWith(join2(dir, ".git"))) continue;
+    if (path4 === gitDir || path4.startsWith(gitDir + sep)) continue;
     if (e.isSymbolicLink()) rmSync(path4, { force: true });
     else if (e.isDirectory() && e.name === ".claude") rmSync(path4, { recursive: true, force: true });
     else if (["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"].includes(e.name)) rmSync(path4, { force: true });
@@ -21776,7 +21780,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
       overridden,
       sha,
       reason: failed ? "the last attempt failed" : `${sha7} has none yet`,
-      next: "Re-run the review job for the last push."
+      next: "Re-run the review job for the last push.",
+      undecided: true
     };
   }
   if (!openai && prior?.status === "pending" && prior.batch) {
@@ -22488,7 +22493,7 @@ ${[way, outcome.note].filter(Boolean).join("\n\n")}`);
     }
     log.error(`${b.title}. ${way}`, b.title);
     await titleCheck(deps, [outcome.sha, ...shas], b.title, way);
-    await publishCheck(deps, checkName, sha, "failure", b.title, way);
+    if (!outcome.undecided) await publishCheck(deps, checkName, sha, "failure", b.title, way);
     return 1;
   } catch (e) {
     setOutput("status", "failed");
