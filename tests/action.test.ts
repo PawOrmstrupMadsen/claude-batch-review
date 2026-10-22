@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { blocker, keyUnusable, main, parseState, parseVerdict } from "../src/action.js";
-import { actionEnv, erroredBilling, noSleep, refused, succeeded, VERDICT_CHANGES, VERDICT_PASS, World } from "./fake.js";
+import { actionEnv, erroredBilling, jobCheck, noSleep, refused, succeeded, VERDICT_CHANGES, VERDICT_PASS, World } from "./fake.js";
 
 // The action logs workflow commands to stdout; keep test output readable.
 const logs: string[] = [];
@@ -196,16 +196,98 @@ describe("main", () => {
     const realNow = Date.now;
     Date.now = () => now;
     try {
-      actionEnv({ "api-keys": "k1", "max-wait-minutes": "" });
+      actionEnv({ "api-keys": "k1", "max-wait-minutes": "", "sync-after-minutes": "0" });
       await main({ fetch: w.fetch, sleep: async (ms) => void (now += ms) });
     } finally {
       Date.now = realNow;
     }
-    assert.ok(now > 20 * 60_000 && now < 21 * 60_000, `waited ${now} ms`);
+    assert.ok(now >= 20 * 60_000 && now < 21 * 60_000, `waited ${now} ms`);
   });
 
   it("rejects an unknown mode", async () => {
     actionEnv({ "api-keys": "k1", mode: "required" });
     assert.equal(await main({ fetch: new World().fetch, sleep: noSleep }), 1);
+  });
+});
+
+describe("override label already set", () => {
+  const check = (w: World) => w.checkRuns.find((c) => c.id === 900)?.output as { title: string; summary: string } | undefined;
+  const never = async () => {
+    throw new Error("waited for a batch");
+  };
+  const labelled = () => {
+    const w = new World();
+    jobCheck(w);
+    w.pr.labels = [{ name: "review-override" }];
+    return w;
+  };
+
+  it("passes at once without submitting a batch", async () => {
+    const w = labelled();
+    const out = actionEnv({ "api-keys": "k1", mode: "pass" });
+    assert.equal(await main({ fetch: w.fetch, sleep: never }), 0);
+    assert.equal(w.batches.length, 0);
+    assert.equal(check(w)?.title, "No review: skipped for the label (overridden by the label)");
+    assert.match(w.comment, /\n## Claude review · `claude-opus-5-5` · head1\n\n⏭️ Not reviewed: the `review-override` label lets this pull request through\. To get a review/);
+    assert.deepEqual(state(w), { status: "overridden", sha: "head1" });
+    assert.deepEqual(out(), { status: "skipped", verdict: "" });
+  });
+
+  it("stops waiting on a stuck batch, keeps it, and a run without the label collects it", async () => {
+    const w = new World();
+    jobCheck(w);
+    w.pollsToEnd = Number.POSITIVE_INFINITY;
+    actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "0.0005" });
+    assert.equal(await main({ fetch: w.fetch, sleep: noSleep }), 1);
+
+    w.pr.labels = [{ name: "review-override" }];
+    actionEnv({ "api-keys": "k1", mode: "pass", "max-wait-minutes": "45" });
+    assert.equal(await main({ fetch: w.fetch, sleep: never }), 0);
+    assert.equal(w.batches.length, 1);
+    assert.ok(!w.batches[0].canceled);
+    assert.equal(state(w)?.batch, "msgbatch_1");
+    assert.match(w.comment, /Batch `msgbatch_1` stays queued: a run after the label is removed collects it\./);
+    assert.equal(check(w)?.title, "No review: skipped for the label (overridden by the label)");
+
+    w.pr.labels = [];
+    w.pollsToEnd = 0;
+    actionEnv({ "api-keys": "k1", mode: "pass" });
+    assert.equal(await main({ fetch: w.fetch, sleep: noSleep }), 0);
+    assert.equal(w.batches.length, 1, "collected, not resubmitted");
+    assert.equal(state(w)?.status, "done");
+  });
+
+  it("concludes a label event at once too, and writes the comment", async () => {
+    const w = labelled();
+    actionEnv({ "api-keys": "k1", mode: "pass" }, { action: "labeled", pull_request: { number: 1, labels: w.pr.labels } });
+    assert.equal(await main({ fetch: w.fetch, sleep: never }), 0);
+    assert.equal(w.batches.length, 0);
+    assert.equal(state(w)?.status, "overridden");
+  });
+
+  it("keeps a stored review of the head commit", async () => {
+    const w = new World();
+    actionEnv({ "api-keys": "k1", mode: "pass" });
+    await main({ fetch: w.fetch, sleep: noSleep });
+    w.pr.labels = [{ name: "review-override" }];
+    const out = actionEnv({ "api-keys": "k1", mode: "pass" });
+    assert.equal(await main({ fetch: w.fetch, sleep: never }), 0);
+    assert.equal(state(w)?.status, "done");
+    assert.deepEqual(out(), { status: "done", verdict: "pass" });
+  });
+
+  it("reviews anyway with force", async () => {
+    const w = labelled();
+    actionEnv({ "api-keys": "k1", mode: "pass", force: "true" });
+    assert.equal(await main({ fetch: w.fetch, sleep: noSleep }), 0);
+    assert.equal(w.batches.length, 1);
+    assert.equal(state(w)?.status, "done");
+  });
+
+  it("reviews anyway in advisory mode, where the label means nothing", async () => {
+    const w = labelled();
+    actionEnv({ "api-keys": "k1" });
+    assert.equal(await main({ fetch: w.fetch, sleep: noSleep }), 0);
+    assert.equal(w.batches.length, 1);
   });
 });

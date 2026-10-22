@@ -21367,6 +21367,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
     maxOutputTokens: num("max-output-tokens", 32e3),
     maxInputTokens: num("max-input-tokens", 3e5),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 6e4,
+    syncAfterMinutes: num("sync-after-minutes", 5, true),
     promptFile: input("prompt-file"),
     reasoningEffort: input("openai-reasoning-effort"),
     force: input("force") === "true"
@@ -21392,7 +21393,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   }
   const canFallBack = fallback === "openai" && !fork;
   const sha7 = sha.slice(0, 7);
-  let comment = await findComment(gh, prNumber, input("comment-author", "github-actions[bot]"));
+  const author = input("comment-author", "github-actions[bot]");
+  let comment = await findComment(gh, prNumber, author);
   const prior = comment ? parseState(comment.body) : null;
   let job = null;
   if (prior?.status === "done" && prior.sha === pr.head.sha && !cfg.force) {
@@ -21402,7 +21404,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   }
   const labelEvent = process.env.GITHUB_EVENT_NAME === "pull_request" && /^(un)?labeled$/.test(event.action ?? "");
   const resumable = !openai && prior?.status === "pending" && prior.sha === pr.head.sha && !!prior.batch;
-  if (labelEvent && (overridden || !resumable)) {
+  const skipForLabel = overridden && mode !== "advisory" && !cfg.force;
+  if (labelEvent && !skipForLabel && (overridden || !resumable)) {
     log.info(`Label change: review state for ${sha7} is ${prior?.sha === pr.head.sha ? prior.status : "missing"}; nothing submitted.`);
     const failed = prior?.sha === pr.head.sha && prior.status === "failed";
     return {
@@ -21416,7 +21419,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   if (!openai && prior?.status === "pending" && prior.batch) {
     const slot = slots.findIndex((s) => s.fp === prior.key);
     if (prior.sha === pr.head.sha && slot >= 0 && !cfg.force) {
-      job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted: prior.submitted ?? "" };
+      const submitted = prior.submitted ?? "";
+      job = { batch: prior.batch, slot, model: prior.model ?? cfg.model, submitted, started: Date.parse(submitted) || Date.now() };
       log.info(`Resuming batch ${job.batch} for ${sha7}.`);
     } else if (slot >= 0) {
       await slots[slot].client.messages.batches.cancel(prior.batch).then(
@@ -21427,9 +21431,9 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   }
   let ctx = null;
   const context = async () => ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile);
-  const submit = async (from, model) => {
+  const request = async (model) => {
     const c = await context();
-    const params = {
+    return {
       model,
       max_tokens: cfg.maxOutputTokens,
       thinking: { type: "adaptive" },
@@ -21441,31 +21445,39 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
       ],
       messages: [{ role: "user", content: c.text }]
     };
-    let down = null;
+  };
+  const onKeys = async (from, call) => {
+    let limited = null;
+    const raise = (e) => {
+      const why = canFallBack ? apiDown(e) : null;
+      throw why ? new AnthropicDown(why, e instanceof Error ? e.message : String(e)) : e;
+    };
     for (let i = from; i < slots.length; i++) {
       try {
-        const batch = await slots[i].client.messages.batches.create({
-          requests: [{ custom_id: `${owner}-${repo}-${prNumber}-${sha7}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64), params }]
-        });
-        log.info(`Submitted ${batch.id} on key ${i + 1}/${slots.length} (${model}).`);
-        return { batch: batch.id, slot: i, model, submitted: batch.created_at };
+        return { value: await call(slots[i]), slot: i };
       } catch (e) {
         if (e instanceof Anthropic.APIError && keyUnusable(e.status, e.type, e.message)) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) unusable: ${e.type ?? e.status} \u2014 ${e.message}`);
           continue;
         }
-        const why = canFallBack ? apiDown(e) : null;
-        if (!why) throw e;
-        down = new AnthropicDown(why, e instanceof Error ? e.message : String(e));
-        if (e instanceof Anthropic.APIError && e.status === 429 && i + 1 < slots.length) {
+        if (e instanceof Anthropic.APIError && rateLimited(e) && i + 1 < slots.length) {
           log.warning(`Key ${i + 1}/${slots.length} (${slots[i].fp}) rate-limited; trying the next key.`);
+          limited = e;
           continue;
         }
-        throw down;
+        raise(e);
       }
     }
-    if (down) throw down;
+    if (limited) raise(limited);
     return null;
+  };
+  const submit = async (from, model) => {
+    const params = await request(model);
+    const custom_id = `${owner}-${repo}-${prNumber}-${sha7}`.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64);
+    const r = await onKeys(from, (s) => s.client.messages.batches.create({ requests: [{ custom_id, params }] }));
+    if (!r) return null;
+    log.info(`Submitted ${r.value.id} on key ${r.slot + 1}/${slots.length} (${model}).`);
+    return { batch: r.value.id, slot: r.slot, model, submitted: r.value.created_at, started: Date.now() };
   };
   const upsert = async (state, body) => {
     const head = `${MARKER} ${JSON.stringify(state)} -->
@@ -21565,6 +21577,83 @@ ${openaiFooter(a, c, retried + (because ? " \xB7 fallback from the Anthropic API
     return canFallBack ? reviewOpenAI("no Anthropic API key can be used (out of credit, at a spend limit, or refused)") : fail(model, why, OUT_OF_CREDIT, "Add credit or a key to `ANTHROPIC_REVIEW_KEYS`, then re-run this job.");
   };
   let running = { model: cfg.model, local: openai };
+  const postReview = async (msg, foot, via) => {
+    const text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n\n").trim();
+    const truncated = msg.stop_reason === "max_tokens" ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
+    const verdict = parseVerdict(text);
+    const bad = unusable(text, verdict);
+    await upsert(
+      { status: "done", verdict, sha, model: msg.model },
+      `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}
+
+${foot}`
+    );
+    log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
+    return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the ${via}.` };
+  };
+  const syncAfter = `${cfg.syncAfterMinutes} min`;
+  const reviewSync = async (from) => {
+    const why = `batch still queued after ${syncAfter}`;
+    job = null;
+    let model = from.model;
+    let slot = from.slot;
+    for (; ; ) {
+      const params = await request(model);
+      const t0 = Date.now();
+      const r = await onKeys(slot, (s) => s.client.messages.stream(params).finalMessage());
+      if (!r) return outOfCredit(model, keysWhy);
+      const msg = r.value;
+      slot = r.slot;
+      log.info(`Direct request on key ${slot + 1}/${slots.length} (${model}) answered in ${Math.round((Date.now() - t0) / 1e3)} s.`);
+      if (msg.stop_reason === "refusal" && model !== cfg.fallbackModel) {
+        log.warning(`${model} declined (${msg.stop_details?.category ?? "no category"}); retrying on ${cfg.fallbackModel}.`);
+        model = cfg.fallbackModel;
+        continue;
+      }
+      if (msg.stop_reason === "refusal")
+        return fail(model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`, "the model declined to review this PR");
+      const foot = syncFooter(msg, why, Math.round((Date.now() - t0) / 1e3), slot, slots.length, await context());
+      return postReview(msg, foot, `Messages API directly (${why})`);
+    }
+  };
+  const cancelSlow = async (j) => {
+    const client = slots[j.slot].client;
+    log.notice(`Batch ${j.batch} still queued after ${syncAfter}; canceling it and reviewing through the Messages API directly.`);
+    await upsert(
+      { status: "pending", sha, model: j.model },
+      `${header(j.model)}\u23F3 Batch \`${j.batch}\` was still queued after ${syncAfter}, so it is canceled and this review goes to the Messages API directly. This comment becomes the review when the model answers.`
+    );
+    try {
+      const b = await client.messages.batches.cancel(j.batch);
+      if (b.processing_status === "ended") return b;
+      const settled = await waitForBatch(client, j.batch, Date.now() + CANCEL_SETTLE_MS, sleep2);
+      if (!settled) log.info(`Batch ${j.batch} is still ${b.processing_status} after ${CANCEL_SETTLE_MS / 1e3} s; going direct.`);
+      return settled;
+    } catch (e) {
+      log.warning(`Could not cancel ${j.batch}: ${e instanceof Error ? e.message : String(e)}`);
+      const b = await client.messages.batches.retrieve(j.batch).catch(() => null);
+      return b?.processing_status === "ended" ? b : null;
+    }
+  };
+  const reviewedElsewhere = async (batch, deadline) => {
+    for (; ; ) {
+      const c = await findComment(gh, prNumber, author);
+      const s = c ? parseState(c.body) : null;
+      if (!c || !s || s.sha === sha && s.status === "pending" && s.batch === batch) return null;
+      comment = c;
+      if (s.sha !== sha) return { status: "failed", overridden, sha, reason: `the review moved on to ${s.sha.slice(0, 7)}`, next: "Re-run the review job for the last push." };
+      if (s.status === "done") {
+        const verdict = s.verdict ?? parseVerdict(c.body);
+        log.info(`Batch ${batch} was canceled by another run, which reviewed ${sha7}.`);
+        return { status: "done", verdict, overridden, sha, ...verdict === "unknown" ? { reason: NO_VERDICT } : {}, note: `Review of ${sha7} by another run.` };
+      }
+      if (s.status === "failed") return { status: "failed", overridden, sha, reason: "the last attempt failed", next: RETRY };
+      if (Date.now() >= deadline)
+        return { status: "pending", overridden, sha, reason: "another run is still reviewing", next: "Re-run this job to collect the review." };
+      log.info(`Batch ${batch} was canceled by another run; waiting for its review.`);
+      await sleep2(15e3);
+    }
+  };
   const reviewAnthropic = async () => {
     if (!job) {
       job = await submit(0, cfg.model);
@@ -21574,13 +21663,24 @@ ${openaiFooter(a, c, retried + (because ? " \xB7 fallback from the Anthropic API
     const deadline = Date.now() + cfg.maxWaitMs;
     for (let round = 0; round < slots.length + 3; round++) {
       const client = slots[job.slot].client;
-      const batch = await waitForBatch(client, job.batch, deadline, sleep2);
+      const syncAt = cfg.syncAfterMinutes && !labelEvent ? job.started + cfg.syncAfterMinutes * 6e4 : Number.POSITIVE_INFINITY;
+      let batch = await waitForBatch(client, job.batch, Math.min(deadline, syncAt), sleep2);
+      let raced = false;
+      if (!batch && syncAt <= deadline) {
+        const other = await reviewedElsewhere(job.batch, deadline);
+        if (other) return other;
+        batch = await cancelSlow(job);
+        if (!batch) return reviewSync(job);
+        raced = true;
+        log.info(`Batch ${job.batch} ended before the cancel reached it; collecting its result.`);
+      }
       if (!batch) {
         log.notice(`Batch ${job.batch} still running after ${cfg.maxWaitMs / 6e4} min; re-run the workflow to collect it.`);
         return { status: "pending", overridden, sha, reason: `batch still running after ${cfg.maxWaitMs / 6e4} min`, next: "Re-run this job to collect it." };
       }
       let result = null;
       for await (const r of await client.messages.batches.results(job.batch)) result = r.result;
+      if (raced && result?.type !== "succeeded") return reviewSync(job);
       if (!result) return fail(job.model, `batch \`${job.batch}\` ended without a result.`, "the batch ended without a result");
       if (result.type === "succeeded") {
         const msg = result.message;
@@ -21593,18 +21693,7 @@ ${openaiFooter(a, c, retried + (because ? " \xB7 fallback from the Anthropic API
         }
         if (msg.stop_reason === "refusal")
           return fail(job.model, `the model declined to review this PR (${msg.stop_details?.category ?? "no category"}).`, "the model declined to review this PR");
-        const text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n\n").trim();
-        const truncated = msg.stop_reason === "max_tokens" ? "\n\n> \u26A0\uFE0F Cut off at `max-output-tokens`." : "";
-        const verdict = parseVerdict(text);
-        const bad = unusable(text, verdict);
-        await upsert(
-          { status: "done", verdict, sha, model: msg.model },
-          `${header(msg.model)}${bad.head}${text || "_Empty response._"}${truncated}
-
-${footer(msg, job, batch, slots.length, await context())}`
-        );
-        log.info(`Posted the review for #${prNumber} @ ${sha7} (verdict: ${verdict}).`);
-        return { status: "done", verdict, overridden, sha, reason: bad.reason, note: `Reviewed by \`${msg.model}\` through the Message Batches API.` };
+        return postReview(msg, footer(msg, job, batch, slots.length, await context()), "Message Batches API");
       }
       if (result.type === "errored") {
         const err = result.error.error;
@@ -21617,11 +21706,27 @@ ${footer(msg, job, batch, slots.length, await context())}`
         }
         return fail(job.model, `the batch request failed: \`${err.type}\` ${err.message}`, "the batch request failed");
       }
+      if (result.type === "canceled") {
+        const other = await reviewedElsewhere(job.batch, deadline);
+        if (other) return other;
+      }
       return fail(job.model, `batch \`${job.batch}\` ended as \`${result.type}\`. Re-run the workflow to try again.`, `the batch ended as ${result.type}`);
     }
     return fail(job.model, "gave up after too many resubmissions.", "too many resubmissions");
   };
+  const skipOverridden = async () => {
+    log.notice(`PR #${prNumber} carries the \`${overrideLabel}\` label: not reviewing ${sha7}.`);
+    const kept = job ? ` Batch \`${job.batch}\` stays queued: a run after the label is removed collects it.` : "";
+    const state = job ? { status: "pending", sha, batch: job.batch, key: slots[job.slot].fp, model: job.model, submitted: job.submitted } : { status: "overridden", sha };
+    await upsert(
+      state,
+      `${header(cfg.model)}\u23ED\uFE0F Not reviewed: the \`${overrideLabel}\` label lets this pull request through.${kept} To get a review, remove the label and re-run the review job for the last push.`
+    );
+    job = null;
+    return { status: "skipped", overridden, sha, reason: "skipped for the label", next: "" };
+  };
   const review = async () => {
+    if (skipForLabel) return skipOverridden();
     if (openai) return reviewOpenAI();
     try {
       return await reviewAnthropic();
@@ -21648,6 +21753,7 @@ ${footer(msg, job, batch, slots.length, await context())}`
   }
 }
 var RETRY = "Re-run this job to try again.";
+var CANCEL_SETTLE_MS = 3e4;
 var FORCE = "Re-run with force to redo it.";
 var OUT_OF_CREDIT = "out of API credit";
 var EMPTY_ANSWER = "the model gave an empty answer";
@@ -21661,10 +21767,15 @@ var AnthropicDown = class extends Error {
 };
 function apiDown(e) {
   if (e instanceof Anthropic.APIConnectionError) return "the Anthropic API is unreachable";
-  if (!(e instanceof Anthropic.APIError) || e.status === void 0) return null;
+  if (!(e instanceof Anthropic.APIError)) return null;
+  if (e.status === void 0)
+    return e.type === "overloaded_error" ? "the Anthropic API is overloaded" : e.type === "api_error" ? "the Anthropic API failed" : e.type === "rate_limit_error" ? "the Anthropic API is rate-limited" : null;
   if (e.status === 429) return "the Anthropic API is rate-limited";
   if (e.status === 529) return "the Anthropic API is overloaded";
   return e.status >= 500 ? `the Anthropic API failed (HTTP ${e.status})` : null;
+}
+function rateLimited(e) {
+  return e.status === 429 || e.status === void 0 && e.type === "rate_limit_error";
 }
 function crashReason(e) {
   return apiDown(e) ?? "the job hit an error";
@@ -21676,10 +21787,10 @@ function parseVerdict(text) {
   const m = /\*\*Verdict:\*\*\s*(✅|⚠\uFE0F?|❌)/u.exec(text);
   return !m ? "unknown" : m[1] === "\u2705" ? "pass" : m[1] === "\u274C" ? "changes" : "minor";
 }
-function num(name, fallback) {
+function num(name, fallback, zero = false) {
   const raw = input(name, String(fallback));
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`Input ${name} must be a positive number, got "${raw}".`);
+  if (!Number.isFinite(n) || n < 0 || n === 0 && !zero) throw new Error(`Input ${name} must be a ${zero ? "non-negative" : "positive"} number, got "${raw}".`);
   return n;
 }
 function keyUnusable(status, type, message) {
@@ -21691,9 +21802,9 @@ async function waitForBatch(client, id, deadline, sleep2) {
   for (let i = 0; ; i++) {
     const batch = await client.messages.batches.retrieve(id);
     if (batch.processing_status === "ended") return batch;
-    if (Date.now() > deadline) return null;
+    if (Date.now() >= deadline) return null;
     if (i % 4 === 0) log.info(`Batch ${id}: ${batch.processing_status}\u2026`);
-    await sleep2(i < 8 ? 15e3 : 3e4);
+    await sleep2(Math.min(i < 8 ? 15e3 : 3e4, Math.max(1e3, deadline - Date.now())));
   }
 }
 function footer(msg, job, batch, keyCount, ctx) {
@@ -21704,6 +21815,14 @@ function footer(msg, job, batch, keyCount, ctx) {
   const waited = batch.ended_at ? Math.round((Date.parse(batch.ended_at) - Date.parse(batch.created_at)) / 1e3) : 0;
   return `---
 <sub>Message Batches API \xB7 ${ctx.files} files \xB7 ${input2.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost} \xB7 batch took ${duration(waited)} \xB7 key ${job.slot + 1}/${keyCount} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
+}
+function syncFooter(msg, why, seconds, slot, keyCount, ctx) {
+  const u = msg.usage;
+  const input2 = u.input_tokens + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  const price = PRICES[msg.model];
+  const cost = price ? ` \xB7 \u2248 $${((input2 * price[0] + u.output_tokens * price[1]) / 1e6).toFixed(3)} (full price)` : "";
+  return `---
+<sub>Messages API, synchronous: ${why} \xB7 ${ctx.files} files \xB7 ${input2.toLocaleString("en")} in / ${u.output_tokens.toLocaleString("en")} out tokens${cost} \xB7 took ${duration(seconds)} \xB7 key ${slot + 1}/${keyCount} \xB7 ${LINK}</sub>${omittedList(ctx)}`;
 }
 function thoughtOut(a) {
   return !a.text || a.truncated && parseVerdict(a.text) === "unknown";

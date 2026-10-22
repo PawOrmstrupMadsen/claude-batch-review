@@ -50,6 +50,9 @@ inputs:
   max-wait-minutes:
     description: "How long the job waits for the batch (default 20); a later run for the same head commit resumes the pending batch. Backend openai: how long it waits for the answer (default 30)."
     default: ''
+  sync-after-minutes:
+    description: "Backend anthropic: a batch still queued this many minutes after its submission is canceled and the same request goes to the Messages API directly (streamed, at full price) on the same key, then the next ones. A batch that ends with a succeeded result within 30 s of the cancel (its request may already be running) is used instead. A re-run that finds an older pending batch goes direct at once. Label-event runs never go direct. 0 turns it off."
+    default: '5'
   prompt-file:
     description: Extra review instructions in the calling repo, read from the PR's base commit. `.github/claude-review.md` is always picked up when present.
     default: ''
@@ -60,7 +63,7 @@ inputs:
     description: "advisory: never fails the job. complete: fails unless a review is posted for the head commit. pass: also fails on a ❌ Changes needed verdict or a review without a verdict line. The override label lets either mode through. A failure without a usable review is titled `No review: <why>` (annotation, job summary, sticky comment, and the check run itself when the workflow grants `checks: write`)."
     default: advisory
   override-label:
-    description: PR label that lets the job pass in modes `complete` and `pass` whatever the review says.
+    description: "PR label that lets the job pass in modes `complete` and `pass` whatever the review says. A run that finds it set submits and waits for nothing (unless `force`): it reuses a stored review of the head commit, or passes at once as `No review: skipped for the label (overridden by the label)`, keeping a queued batch for a run after the label is removed."
     default: review-override
   comment-author:
     description: Login that owns the sticky comment; change it only when github-token is not the Actions token.
