@@ -315,8 +315,11 @@ const HOP = new Set(["host", "content-length", "connection", "transfer-encoding"
 export function startRelay(upstream: string): Promise<Relay> {
   const up = new URL(upstream);
   const send = up.protocol === "https:" ? httpsRequest : httpRequest;
+  const open = new Set<{ destroy: () => void }>();
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
+    // A dropped stream on either side ends only this exchange, never the action.
+    req.on("error", () => res.destroy());
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       let raw = Buffer.concat(chunks);
@@ -334,15 +337,22 @@ export function startRelay(upstream: string): Promise<Relay> {
       const out = send(
         { protocol: up.protocol, hostname: up.hostname, port: up.port || undefined, method: req.method, path: `${base}${req.url ?? "/"}`, headers },
         (r) => {
+          r.on("error", () => res.destroy());
           const back: Record<string, string | string[]> = {};
           for (const [k, v] of Object.entries(r.headers)) if (v !== undefined && !HOP.has(k.toLowerCase())) back[k] = v;
           res.writeHead(r.statusCode ?? 502, { ...back, connection: "close" });
           r.pipe(res);
         },
       );
+      open.add(out);
+      // Claude Code gave up on the request, or was stopped: the model need not keep generating.
+      res.on("close", () => {
+        out.destroy();
+        open.delete(out);
+      });
       out.on("error", (e) => {
         if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-        res.end(`router unreachable: ${e.message}`);
+        if (!res.writableEnded) res.end(`router unreachable: ${e.message}`);
       });
       out.end(raw);
     });
@@ -356,6 +366,7 @@ export function startRelay(upstream: string): Promise<Relay> {
         port,
         close: () =>
           new Promise<void>((r) => {
+            for (const o of open) o.destroy();
             server.closeAllConnections();
             server.close(() => r());
           }),

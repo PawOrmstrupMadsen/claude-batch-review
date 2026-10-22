@@ -21448,8 +21448,10 @@ var HOP = /* @__PURE__ */ new Set(["host", "content-length", "connection", "tran
 function startRelay(upstream) {
   const up = new URL(upstream);
   const send = up.protocol === "https:" ? httpsRequest : httpRequest;
+  const open = /* @__PURE__ */ new Set();
   const server = createServer((req, res) => {
     const chunks = [];
+    req.on("error", () => res.destroy());
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       let raw = Buffer.concat(chunks);
@@ -21466,15 +21468,21 @@ function startRelay(upstream) {
       const out = send(
         { protocol: up.protocol, hostname: up.hostname, port: up.port || void 0, method: req.method, path: `${base}${req.url ?? "/"}`, headers },
         (r) => {
+          r.on("error", () => res.destroy());
           const back = {};
           for (const [k, v] of Object.entries(r.headers)) if (v !== void 0 && !HOP.has(k.toLowerCase())) back[k] = v;
           res.writeHead(r.statusCode ?? 502, { ...back, connection: "close" });
           r.pipe(res);
         }
       );
+      open.add(out);
+      res.on("close", () => {
+        out.destroy();
+        open.delete(out);
+      });
       out.on("error", (e) => {
         if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-        res.end(`router unreachable: ${e.message}`);
+        if (!res.writableEnded) res.end(`router unreachable: ${e.message}`);
       });
       out.end(raw);
     });
@@ -21487,6 +21495,7 @@ function startRelay(upstream) {
       resolve2({
         port,
         close: () => new Promise((r) => {
+          for (const o of open) o.destroy();
           server.closeAllConnections();
           server.close(() => r());
         })

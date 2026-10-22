@@ -86,6 +86,28 @@ describe("scrub", () => {
 });
 
 describe("startRelay", () => {
+  it("survives an upstream that drops the stream mid-answer", async () => {
+    const up = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("event: ping\n\n");
+      setTimeout(() => res.socket?.destroy(), 20);
+    });
+    await new Promise<void>((r) => up.listen(0, "127.0.0.1", r));
+    const relay = await startRelay(`http://127.0.0.1:${(up.address() as { port: number }).port}`);
+    try {
+      const res = await fetch(`http://127.0.0.1:${relay.port}/v1/messages`, { method: "POST", body: "{}" });
+      await res.text().catch(() => "");
+      // The relay still answers the next request.
+      const again = await fetch(`http://127.0.0.1:${relay.port}/v1/messages`, { method: "POST", body: "{}" }).catch(() => null);
+      assert.ok(again);
+      await again.text().catch(() => "");
+    } finally {
+      await relay.close();
+      up.closeAllConnections();
+      up.close();
+    }
+  });
+
   it("reshapes a messages body on its way upstream and streams the answer back", async () => {
     let seen: { path?: string; body?: unknown; auth?: string } = {};
     const up = createServer((req, res) => {
