@@ -117,7 +117,7 @@ async function ask(post: Post, sleep: (ms: number) => Promise<void>, r: ChatRequ
       continue;
     }
     if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
-      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.`, reason: "the prompt is too large for the model" };
+      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`openai-max-input-tokens\` (or \`max-input-tokens\`).`, reason: "the prompt is too large for the model" };
     return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}`, reason: `the model server answered HTTP ${res.status}` };
   }
 }

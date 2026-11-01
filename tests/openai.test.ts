@@ -89,7 +89,7 @@ describe("backend openai", () => {
     const out = actionEnv(openai());
     assert.equal(await run(w), 1);
     assert.equal(state(w)?.status, "failed");
-    assert.match(w.comment, /### ⚠️ No review: the prompt is too large for the model\n\nThe prompt does not fit the model's context .*Lower `max-input-tokens`/);
+    assert.match(w.comment, /### ⚠️ No review: the prompt is too large for the model\n\nThe prompt does not fit the model's context .*Lower `openai-max-input-tokens`/);
     assert.equal(out().status, "failed");
   });
 
