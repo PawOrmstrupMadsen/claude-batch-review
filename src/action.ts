@@ -136,6 +136,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     effort: input("effort", "high") as "low" | "medium" | "high" | "xhigh" | "max",
     maxOutputTokens: num("max-output-tokens", 32000),
     maxInputTokens: num("max-input-tokens", 300000),
+    // 0: the same prompt as max-input-tokens builds.
+    openaiMaxInputTokens: num("openai-max-input-tokens", 0, true),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 60_000,
     syncAfterMinutes: num("sync-after-minutes", 5, true),
     promptFile: input("prompt-file"),
@@ -255,6 +257,12 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
 
   let ctx: ReviewContext | null = null;
   const context = async () => (ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile, files));
+  // The OpenAI-compatible endpoint (a local model, as backend or fallback) may have a smaller context than Claude.
+  let openaiCtx: ReviewContext | null = null;
+  const openaiContext = async () =>
+    cfg.openaiMaxInputTokens && cfg.openaiMaxInputTokens < cfg.maxInputTokens
+      ? (openaiCtx ??= await buildContext(gh, pr, cfg.openaiMaxInputTokens, cfg.promptFile, files))
+      : context();
 
   /** The one request a review sends, as a batch request or a direct Messages API call. */
   const request = async (model: string): Promise<Anthropic.Messages.MessageCreateParamsNonStreaming> => {
@@ -363,7 +371,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
 
   const reviewOpenAI = async (because = ""): Promise<Outcome> => {
     running = { model: openaiModel, local: true };
-    const c = await context();
+    const c = await openaiContext();
     if (because) log.warning(`Falling back to the openai backend: ${because}.`);
     const via = because ? `> ↪️ Fallback review: ${because}, so \`${openaiModel}\` reviewed this instead of Claude.\n\n` : "";
     const after = because ? ` (in the fallback review: ${because})` : "";

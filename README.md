@@ -50,7 +50,7 @@ A PR opened before the workflow existed has no **Claude review** check, so a req
 reopen it (`gh pr close N && gh pr reopen N`) or push to it: either runs the workflow on the PR.
 
 Inputs (`with:`): `backend` (`anthropic`; `openai`, `router`), `api-keys` (backend `anthropic`), `fallback-backend` (empty),
-`openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key` (backend or fallback `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
+`openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key`, `openai-max-input-tokens` (empty: `max-input-tokens`; backend or fallback `openai`), `model` (default `claude-opus-5-5`), `effort` (`high`),
 `fallback-model` (`claude-opus-4-8`), `max-input-tokens` (`300000`), `max-output-tokens` (`32000`),
 `max-wait-minutes` (`20`; `30` for `openai`), `sync-after-minutes` (`5`; `0` turns it off), `mode` (`advisory`), `override-label` (`review-override`), `prompt-file`, `force`,
 `pr`, `github-token`, `comment-author`, `check-name` (empty; `Review` with backend `router`), and the router's own
@@ -125,9 +125,14 @@ cannot serve: the same run reviews through the `openai-*` inputs instead.
 ```yaml
           api-keys: ${{ secrets.ANTHROPIC_REVIEW_KEYS }}
           fallback-backend: openai
-          openai-base-url: http://<model-server>:8000/v1
+          openai-base-url: ${{ vars.LLM_ROUTER_URL }}/v1
           openai-model: <model>
+          openai-max-input-tokens: 100000
 ```
+
+The URL lives in a repository (or organisation) variable, so the workflow names no host. `openai-max-input-tokens`
+cuts the fallback's prompt for a model with less context than Claude; Claude's own requests keep
+`max-input-tokens` (300K by default), and the prompt is only built a second time when the fallback runs.
 
 What falls back, after the key rotation and the SDK's own 4 retries:
 

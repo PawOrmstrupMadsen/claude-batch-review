@@ -21573,7 +21573,7 @@ async function ask(post, sleep2, r) {
       continue;
     }
     if ([400, 413, 422].includes(res.status) && /context|too long|too large/i.test(msg))
-      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`max-input-tokens\`.`, reason: "the prompt is too large for the model" };
+      return { ok: false, why: `the prompt does not fit the model's context (HTTP ${res.status}: ${msg}). Lower \`openai-max-input-tokens\` (or \`max-input-tokens\`).`, reason: "the prompt is too large for the model" };
     return { ok: false, why: `the request failed: HTTP ${res.status} ${msg}`, reason: `the model server answered HTTP ${res.status}` };
   }
 }
@@ -21705,6 +21705,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
     effort: input("effort", "high"),
     maxOutputTokens: num("max-output-tokens", 32e3),
     maxInputTokens: num("max-input-tokens", 3e5),
+    // 0: the same prompt as max-input-tokens builds.
+    openaiMaxInputTokens: num("openai-max-input-tokens", 0, true),
     maxWaitMs: num("max-wait-minutes", openai ? 30 : 20) * 6e4,
     syncAfterMinutes: num("sync-after-minutes", 5, true),
     promptFile: input("prompt-file"),
@@ -21811,6 +21813,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   }
   let ctx = null;
   const context = async () => ctx ??= await buildContext(gh, pr, cfg.maxInputTokens, cfg.promptFile, files);
+  let openaiCtx = null;
+  const openaiContext = async () => cfg.openaiMaxInputTokens && cfg.openaiMaxInputTokens < cfg.maxInputTokens ? openaiCtx ??= await buildContext(gh, pr, cfg.openaiMaxInputTokens, cfg.promptFile, files) : context();
   const request = async (model) => {
     const c = await context();
     return {
@@ -21908,7 +21912,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   };
   const reviewOpenAI = async (because = "") => {
     running = { model: openaiModel, local: true };
-    const c = await context();
+    const c = await openaiContext();
     if (because) log.warning(`Falling back to the openai backend: ${because}.`);
     const via = because ? `> \u21AA\uFE0F Fallback review: ${because}, so \`${openaiModel}\` reviewed this instead of Claude.
 

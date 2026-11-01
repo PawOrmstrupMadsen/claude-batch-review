@@ -89,6 +89,8 @@ inputs:
   max-input-tokens:
     description: Approximate cap on the prompt; the largest diffs and full files are left out beyond it, and the comment lists what was left out.
     default: '300000'
+  openai-max-input-tokens:
+    description: "Backend openai (or fallback-backend openai): a smaller cap on the prompt sent to the OpenAI-compatible endpoint, for a model with less context than Claude. Empty: `max-input-tokens`."
   max-output-tokens:
     description: max_tokens of the request (thinking included).
     default: '32000'

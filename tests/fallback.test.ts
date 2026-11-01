@@ -55,6 +55,30 @@ describe("fallback-backend", () => {
     assert.match(out.summary(), /### Review: ✅ Looks good \(fallback: local-model-q4\)\n\nReviewed by `local-model-q4` through the OpenAI-compatible API, the fallback backend: no Anthropic API key/);
   });
 
+  it("cuts the fallback's prompt to openai-max-input-tokens, and Claude's to max-input-tokens", async () => {
+    const big = "+" + "x".repeat(60_000);
+    const bigWorld = () => {
+      const w = new World();
+      w.files = [{ filename: "big.ts", status: "added", additions: 1, deletions: 0, patch: big }];
+      w.trees.head1 = { "big.ts": big };
+      return w;
+    };
+    const user = (body: Record<string, unknown>) => (body.messages as { role: string; content: string }[]).find((m) => m.role === "user")!.content;
+    const w = bigWorld();
+    w.keys = { k1: "credit" };
+    actionEnv(withFallback({ "openai-max-input-tokens": "10000" }));
+    assert.equal(await run(w), 0);
+    assert.match(user(w.chats[0].body), /diff truncated/);
+    assert.ok(user(w.chats[0].body).length < 10_000 * 4);
+
+    const c = bigWorld();
+    actionEnv(withFallback({ "openai-max-input-tokens": "10000" }));
+    assert.equal(await run(c), 0);
+    const sent = JSON.stringify(c.batches[0].params);
+    assert.ok(sent.includes("x".repeat(60_000)), "Claude gets the whole diff");
+    assert.equal(c.chats.length, 0);
+  });
+
   it("falls back on the monthly spend cap's 429 without SDK retries piling up", async () => {
     const w = new World();
     w.keys = { k1: "spend-cap" };

@@ -36,7 +36,8 @@ jobs:
     # GitHub-hosted runners (ubuntu-latest) cost Actions minutes in a private repo. A public repo uses
     # ubuntu-latest instead: free there, and fork PRs must never reach a self-hosted runner.
     runs-on: [self-hosted, linux, x64, <repo-label>]
-    timeout-minutes: 60
+    # With the fallback, the job can wait twice max-wait-minutes.
+    timeout-minutes: 100
     steps:
       # A release pin (@<sha> # vX.Y.Z); scripts/release.sh in claude-batch-review moves every caller.
       - uses: PawOrmstrupMadsen/claude-batch-review@6c17f5321a9f09bf4c27e287523ac422d2881f18 # v1.4.0
@@ -47,8 +48,9 @@ jobs:
           mode: pass
           max-wait-minutes: 45
           # When every key is out of credit or the API stays rate-limited, review through an
-          # OpenAI-compatible endpoint instead (see the README, "Fallback backend"). The job can
-          # then wait twice max-wait-minutes: raise timeout-minutes to 100.
-          # fallback-backend: openai
-          # openai-base-url: http://<model-server>:8000/v1
-          # openai-model: <model>
+          # OpenAI-compatible endpoint instead (see the README, "Fallback backend"), with a prompt
+          # that fits its context. A runner that cannot reach the endpoint (ubuntu-latest) leaves it out.
+          fallback-backend: openai
+          openai-base-url: ${{ vars.LLM_ROUTER_URL }}/v1
+          openai-model: <model>
+          openai-max-input-tokens: 100000
