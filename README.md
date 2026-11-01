@@ -130,7 +130,8 @@ cannot serve: the same run reviews through the `openai-*` inputs instead.
           openai-max-input-tokens: 100000
 ```
 
-The URL lives in a repository (or organisation) variable, so the workflow names no host. `openai-max-input-tokens`
+The URL lives in a repository variable, so the workflow names no host (on GitHub Free, private
+repositories cannot read organisation variables). `openai-max-input-tokens`
 cuts the fallback's prompt for a model with less context than Claude; Claude's own requests keep
 `max-input-tokens` (300K by default), and the prompt is only built a second time when the fallback runs.
 
