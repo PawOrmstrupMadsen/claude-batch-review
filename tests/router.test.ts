@@ -223,7 +223,7 @@ describe("backend router: the local engine", () => {
     assert.equal(first[first.indexOf("--max-turns") + 1], "100");
     assert.equal(final[final.indexOf("--resume") + 1], "s1");
     assert.ok(!final.includes("--allowedTools"), "no tools on the final turn");
-    assert.match(final[final.indexOf("--disallowedTools") + 1], /^Read,Glob,Grep,Bash,/);
+    assert.match(final[final.indexOf("--disallowedTools") + 1], /^Read,Glob,Grep,.*\bAgent\b.*\bBash\b/);
     assert.ok(final.includes("--append-system-prompt-file"));
     assert.equal(state(w)?.verdict, "pass");
     assert.ok(w.comment.includes(text), "the whole large answer is posted");
