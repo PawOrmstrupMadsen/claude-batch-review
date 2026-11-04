@@ -44,6 +44,9 @@ inputs:
   local-timeout-minutes:
     description: "Backend router, local engine: how long Claude Code may review, queue waits at the router included."
     default: '60'
+  local-max-turns:
+    description: "Backend router, local engine: Claude Code's turns (one tool round each). A review that uses them all is asked once more, without tools, for its review from what it has read."
+    default: '100'
   local-context-tokens:
     description: "Backend router, local engine: the context window Claude Code compacts against."
     default: '262144'

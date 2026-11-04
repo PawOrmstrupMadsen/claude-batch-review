@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { denyRules, parseResult, rewriteBody, scrub, startRelay } from "../src/local.js";
+import { denyRules, parseResult, rewriteBody, scrub, spawnClaude, startRelay } from "../src/local.js";
 
 describe("rewriteBody", () => {
   it("drops the billing line and folds a leading system message into the system prompt", () => {
@@ -60,6 +60,32 @@ describe("parseResult", () => {
     assert.equal(!err.ok && err.reason, "the local review failed");
     const empty = parseResult(run('{"result":"","num_turns":40}'), 1);
     assert.equal(!empty.ok && empty.reason, "the local model gave an empty answer");
+  });
+  it("names the cause of an error result that has no result text", () => {
+    const turns = parseResult(run('{"type":"result","is_error":true,"subtype":"error_max_turns","num_turns":41,"errors":["Reached maximum number of turns (40)"]}'), 1);
+    assert.ok(!turns.ok);
+    assert.equal(turns.reason, "the local review ran out of turns");
+    assert.equal(turns.why, "the local review failed (error_max_turns after 41 turns): Reached maximum number of turns (40)");
+    const bare = parseResult({ code: 1, stdout: '{"is_error":true}', stderr: "", timedOut: false }, 1);
+    assert.ok(!bare.ok);
+    assert.equal(bare.why, "the local review failed (error after ? turns): no message (exit 1)");
+  });
+});
+
+describe("spawnClaude", () => {
+  it("collects a large final answer whole, multi-byte characters across chunk edges included", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "claude-bin-"));
+    const text = `**Verdict:** ⚠️ Minor issues\n\n${"Æblegrød — ✅ fine. ".repeat(6000)}`;
+    const line = JSON.stringify({ type: "result", is_error: false, result: text, num_turns: 90, duration_ms: 1000 });
+    writeFileSync(join(bin, "answer.json"), `{"type":"system"}\n${line}\n`);
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\ncat "${join(bin, "answer.json")}"\n`);
+    chmodSync(join(bin, "claude"), 0o755);
+    const r = await spawnClaude(bin)([], { cwd: bin, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeoutMs: 30_000 });
+    rmSync(bin, { recursive: true, force: true });
+    assert.ok(Buffer.byteLength(r.stdout) > 100_000, "a large answer");
+    const p = parseResult(r, 1);
+    assert.ok(p.ok, p.ok ? "" : p.why);
+    assert.equal(p.answer.text, text.trim());
   });
 });
 

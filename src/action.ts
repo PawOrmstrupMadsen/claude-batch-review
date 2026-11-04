@@ -654,6 +654,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
         diff,
         githubToken: input("github-token"),
         timeoutMs: num("local-timeout-minutes", 60) * 60_000,
+        maxTurns: Math.ceil(num("local-max-turns", 100)),
         maxOutputTokens: cfg.maxOutputTokens,
         contextTokens: num("local-context-tokens", 262144),
         claudeVersion: input("claude-code-version", "2.1.263"),
@@ -662,7 +663,7 @@ async function run({ mode, overrideLabel, backend, fallback, event }: Settings, 
     );
   };
   const localFooter = (a: LocalAnswer) =>
-    `---\n<sub>Claude Code over the checkout, read-only · \`${localModel}\` through the LLM router · ${a.turns} turns · took ${duration(Math.round(a.ms / 1000))} · ${LINK}</sub>`;
+    `---\n<sub>Claude Code over the checkout, read-only · \`${localModel}\` through the LLM router · ${a.turns} turns${a.outOfTurns ? " (out of turns: answered from what it had read)" : ""} · took ${duration(Math.round(a.ms / 1000))} · ${LINK}</sub>`;
 
   /** The local tier's review, or the local model standing in for Claude (`because`). */
   const reviewLocal = async (because = ""): Promise<Outcome> => {
