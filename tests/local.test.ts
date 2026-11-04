@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +81,7 @@ describe("spawnClaude", () => {
     writeFileSync(join(bin, "claude"), `#!/bin/sh\ncat "${join(bin, "answer.json")}"\n`);
     chmodSync(join(bin, "claude"), 0o755);
     const r = await spawnClaude(bin)([], { cwd: bin, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeoutMs: 30_000 });
+    rmSync(bin, { recursive: true, force: true });
     assert.ok(Buffer.byteLength(r.stdout) > 100_000, "a large answer");
     const p = parseResult(r, 1);
     assert.ok(p.ok, p.ok ? "" : p.why);

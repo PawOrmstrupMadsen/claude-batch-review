@@ -132,7 +132,7 @@ export async function localReview(o: LocalOptions, deps: { runClaude?: RunClaude
     if (first?.subtype !== "error_max_turns" || !first.session_id) return parseResult(r, Date.now() - t0);
     // A large pull request can take more turns than allowed; the session still holds what it read.
     log.warning(`The local review used all ${o.maxTurns} turns; asking for its review from what it has read.`);
-    const final = ["-p", FINAL_PROMPT, "--resume", first.session_id, "--max-turns", "2", ...common, "--disallowedTools", `Read,Glob,Grep,${denied}`];
+    const final = ["-p", FINAL_PROMPT, "--resume", first.session_id, "--max-turns", "2", ...common, "--disallowedTools", `Read,Glob,Grep,TodoWrite,Skill,ToolSearch,AskUserQuestion,Agent,${denied}`];
     const r2 = await runClaude(final, { cwd: work, env, timeoutMs: Math.max(60_000, o.timeoutMs - (Date.now() - t0)) });
     if (r2.timedOut) return timedOut;
     const res = parseResult(r2, Date.now() - t0);
@@ -174,7 +174,7 @@ export function parseResult(r: ClaudeRun, ms: number): LocalResult {
   const stderr = r.stderr.trim().slice(-300);
   if (!d) return { ok: false, why: `Claude Code gave no result (exit ${r.code}): ${stderr || "nothing on stderr"}`, reason: "the local model gave no answer" };
   if (d.is_error) {
-    const errors = Array.isArray(d.errors) ? d.errors.map(String).join("; ") : "";
+    const errors = Array.isArray(d.errors) ? d.errors.map((e) => (typeof e === "string" ? e : JSON.stringify(e))).join("; ") : "";
     const detail = String(d.result ?? "").trim() || errors || `no message (exit ${r.code}${stderr ? `, stderr: ${stderr}` : ""})`;
     const turns = d.subtype === "error_max_turns";
     return {

@@ -21295,7 +21295,7 @@ ${o.guidance || "(The repository has no guidance files.)"}`);
     const first = lastResult(r.stdout);
     if (first?.subtype !== "error_max_turns" || !first.session_id) return parseResult(r, Date.now() - t0);
     log.warning(`The local review used all ${o.maxTurns} turns; asking for its review from what it has read.`);
-    const final = ["-p", FINAL_PROMPT, "--resume", first.session_id, "--max-turns", "2", ...common, "--disallowedTools", `Read,Glob,Grep,${denied}`];
+    const final = ["-p", FINAL_PROMPT, "--resume", first.session_id, "--max-turns", "2", ...common, "--disallowedTools", `Read,Glob,Grep,TodoWrite,Skill,ToolSearch,AskUserQuestion,Agent,${denied}`];
     const r2 = await runClaude(final, { cwd: work, env, timeoutMs: Math.max(6e4, o.timeoutMs - (Date.now() - t0)) });
     if (r2.timedOut) return timedOut;
     const res = parseResult(r2, Date.now() - t0);
@@ -21323,7 +21323,7 @@ function parseResult(r, ms) {
   const stderr = r.stderr.trim().slice(-300);
   if (!d) return { ok: false, why: `Claude Code gave no result (exit ${r.code}): ${stderr || "nothing on stderr"}`, reason: "the local model gave no answer" };
   if (d.is_error) {
-    const errors = Array.isArray(d.errors) ? d.errors.map(String).join("; ") : "";
+    const errors = Array.isArray(d.errors) ? d.errors.map((e) => typeof e === "string" ? e : JSON.stringify(e)).join("; ") : "";
     const detail = String(d.result ?? "").trim() || errors || `no message (exit ${r.code}${stderr ? `, stderr: ${stderr}` : ""})`;
     const turns = d.subtype === "error_max_turns";
     return {
@@ -22175,7 +22175,7 @@ ${f.patch ?? "[binary or too large]"}
         diff,
         githubToken: input("github-token"),
         timeoutMs: num("local-timeout-minutes", 60) * 6e4,
-        maxTurns: num("local-max-turns", 100),
+        maxTurns: Math.ceil(num("local-max-turns", 100)),
         maxOutputTokens: cfg.maxOutputTokens,
         contextTokens: num("local-context-tokens", 262144),
         claudeVersion: input("claude-code-version", "2.1.263")
