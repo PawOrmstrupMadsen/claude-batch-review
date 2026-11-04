@@ -35,7 +35,7 @@ interface ClaudeCall {
 function setup(text = VERDICT_PASS) {
   const w = new World();
   const calls: ClaudeCall[] = [];
-  let answer = (): { stdout: string; timedOut?: boolean } => ({
+  let answer = (_args: string[]): { stdout: string; timedOut?: boolean } => ({
     stdout: `{"type":"system"}\n${JSON.stringify({ type: "result", is_error: false, result: text, num_turns: 7, duration_ms: 125_000 })}\n`,
   });
   const runClaude: RunClaude = async (args, opts) => {
@@ -51,7 +51,7 @@ function setup(text = VERDICT_PASS) {
       batches: w.batches.length,
       system: readFileSync(args[args.indexOf("--append-system-prompt-file") + 1], "utf8"),
     });
-    const a = answer();
+    const a = answer(args);
     return { code: 0, stdout: a.stdout, stderr: "", timedOut: !!a.timedOut };
   };
   const checkouts: string[] = [];
@@ -206,6 +206,44 @@ describe("backend router: the local engine", () => {
     assert.equal(state(w)?.status, "failed");
     assert.match(w.comment, /### ⚠️ No review: the local review failed/);
     assert.equal(check(w)?.output.title, "No review: the local review failed");
+  });
+
+  it("asks a review that ran out of turns on a large pull request for its answer, without tools", async () => {
+    const { w, calls, run, answer } = setup();
+    const text = `${VERDICT_PASS}\n\n${"- `src/a.ts`: read, fine.\n".repeat(2000)}`;
+    answer((args) =>
+      args.includes("--resume")
+        ? { stdout: JSON.stringify({ type: "result", is_error: false, result: text, num_turns: 1, session_id: "s1" }) }
+        : { stdout: JSON.stringify({ type: "result", is_error: true, subtype: "error_max_turns", num_turns: 101, session_id: "s1", errors: ["Reached maximum number of turns (100)"] }) },
+    );
+    actionEnv(inputs());
+    assert.equal(await run(), 0);
+    assert.equal(calls.length, 2);
+    const [first, final] = calls.map((c) => c.args);
+    assert.equal(first[first.indexOf("--max-turns") + 1], "100");
+    assert.equal(final[final.indexOf("--resume") + 1], "s1");
+    assert.ok(!final.includes("--allowedTools"), "no tools on the final turn");
+    assert.match(final[final.indexOf("--disallowedTools") + 1], /^Read,Glob,Grep,Bash,/);
+    assert.ok(final.includes("--append-system-prompt-file"));
+    assert.equal(state(w)?.verdict, "pass");
+    assert.ok(w.comment.includes(text), "the whole large answer is posted");
+    assert.match(w.comment, /· 102 turns \(out of turns: answered from what it had read\) ·/);
+  });
+
+  it("names the cause when a review out of turns gives no final answer either", async () => {
+    const { w, run, answer } = setup();
+    answer((args) => ({
+      stdout: JSON.stringify(
+        args.includes("--resume")
+          ? { type: "result", is_error: true, subtype: "error_during_execution", num_turns: 0, errors: ["context window exceeded"] }
+          : { type: "result", is_error: true, subtype: "error_max_turns", num_turns: 41, session_id: "s1" },
+      ),
+    }));
+    actionEnv(inputs({ "local-max-turns": "40" }));
+    assert.equal(await run(), 1);
+    assert.match(w.comment, /### ⚠️ No review: the local review ran out of turns/);
+    assert.match(w.comment, /used all 40 turns, and its final answer failed too: the local review failed \(error_during_execution after 0 turns\): context window exceeded/);
+    assert.ok(!/failed: \s*$/m.test(w.comment), "never an empty reason");
   });
 
   it("says so when the local review times out", async () => {

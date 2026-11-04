@@ -203,8 +203,10 @@ through the API only.
   environment (no GitHub or Actions tokens, and never the review token), a scratch `HOME`, no MCP servers,
   Read, Glob and Grep only, and Read denied for the runner's credentials, temp and the system folders. A small
   relay on 127.0.0.1 reshapes its requests for strict chat templates.
-- It may take `local-timeout-minutes` (60), queue waits at the router included. The runner needs `git`,
-  `curl` and `bash`, and must reach the router.
+- It may take `local-timeout-minutes` (60), queue waits at the router included, and `local-max-turns` (100)
+  turns. A review that uses every turn, as a large pull request can, resumes once without tools and writes its
+  review from what it has read; the footer says so. A failure names Claude Code's own cause (its `subtype` and
+  `errors`). The runner needs `git`, `curl` and `bash`, and must reach the router.
 
 ### Second opinion
 
