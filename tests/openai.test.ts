@@ -256,6 +256,15 @@ describe("backend openai", () => {
       assert.equal(out().status, "skipped");
     });
 
+    it("still skips any other event that can carry a fork's pull request", async () => {
+      const w = fork();
+      const out = actionEnv(openai({ "openai-fork-prs": "true", mode: "advisory" }));
+      process.env.GITHUB_EVENT_NAME = "pull_request_review";
+      assert.equal(await run(w), 0);
+      assert.equal(w.chats.length, 0);
+      assert.equal(out().status, "skipped");
+    });
+
     it("skips a fork on pull_request_target unless asked", async () => {
       const w = fork();
       const out = actionEnv(openai({ mode: "advisory" }));
