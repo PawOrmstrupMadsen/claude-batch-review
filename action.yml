@@ -62,6 +62,9 @@ inputs:
   fallback-backend:
     description: "Backend anthropic: `openai` reviews through the openai inputs (`openai-base-url`, `openai-model`, `openai-reasoning-effort`, `openai-api-key`) in the same run when no key can be used (out of credit, at a spend limit, refused) or the API stays rate-limited, overloaded or down after the SDK's retries. Not for fork PRs. Empty: no fallback."
     default: ''
+  openai-fork-prs:
+    description: "Backend openai: `true` reviews a fork's pull request too, on `pull_request_target` or `workflow_dispatch`, sending its diff and changed files to `openai-base-url`. Only for a workflow that checks nothing out. A fork's `pull_request` run always skips. Default: forks are skipped."
+    default: 'false'
   openai-base-url:
     description: "Backend openai (or fallback-backend openai): the API base URL, up to and including `/v1`; the action posts to `<base>/chat/completions`."
     default: ''

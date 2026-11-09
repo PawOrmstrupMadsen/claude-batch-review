@@ -115,7 +115,9 @@ example a self-hosted model server, when the Anthropic keys are out of credit or
   `max-output-tokens`.
 - No key is sent unless `openai-api-key` is set (a warning when it goes over plain HTTP), and the key is
   scrubbed from any server error quoted in the comment. Fork PRs are skipped, as with the Anthropic backend
-  (where they get no secrets): their token cannot write the comment.
+  (where they get no secrets): their token cannot write the comment. A workflow on `pull_request_target` that
+  checks nothing out can set `openai-fork-prs: true` to review them: the model has no tools and only reads the
+  diff and changed files, which go to `openai-base-url`.
 
 ## Fallback backend
 
