@@ -21748,7 +21748,8 @@ async function run({ mode, overrideLabel, backend, fallback, event }, deps) {
   if (usesOpenAI && openaiKey && !baseUrl.startsWith("https:"))
     log.warning("openai-api-key goes to a plain-HTTP endpoint: keep that endpoint on a private network.");
   const fork = pr.head.repo?.full_name !== pr.base.repo?.full_name;
-  if (openai && fork) {
+  const forkAsked = input("openai-fork-prs") === "true" && ["pull_request_target", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME ?? "");
+  if (openai && fork && !forkAsked) {
     log.notice("Fork pull request: the openai backend skips it.");
     return { status: "skipped", overridden, sha, reason: "the openai backend skips fork pull requests", next: "" };
   }
